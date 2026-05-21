@@ -170,6 +170,30 @@ export function createEngine(
   }
   const onKeyDown = (e: KeyboardEvent) => {
     if (arrowSet.has(e.key)) { e.preventDefault(); setKey(e.key, true); return }
+    // Editor undo / redo. Checked before custom-anim bindings so a user-bound
+    // 'z' or 'y' key doesn't swallow the shortcut.
+    if (e.ctrlKey || e.metaKey) {
+      const k = e.key.toLowerCase()
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); (window as any).__editor?.undo?.(); return }
+      if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); (window as any).__editor?.redo?.(); return }
+    }
+    // Check custom animation bindings first
+    const customAnims = (window as any).__customAnims as
+      | Array<{ heroKey?: string; oppKey?: string; resolved: any[] }>
+      | undefined
+    const key = e.key.toLowerCase()
+    if (customAnims) {
+      for (const ca of customAnims) {
+        if (ca.heroKey && ca.heroKey === key) {
+          (window as any).__hero?.playCustomAnimation?.(ca.resolved)
+          return
+        }
+        if (ca.oppKey && ca.oppKey === key) {
+          (window as any).__opponent?.playCustomAnimation?.(ca.resolved)
+          return
+        }
+      }
+    }
     if (e.key === 'u' || e.key === 'U')   (window as any).__opponent?.playSlash?.()
     if (e.key === 'Enter')                (window as any).__opponent?.playBlock?.()
     if (e.key === 'q' || e.key === 'Q')   (window as any).__hero?.playStrike?.()
@@ -251,19 +275,38 @@ export function createEngine(
       }
     }
 
-    // --- Undo stack (last N bone-rotation snapshots) ---
+    // --- Undo / Redo stacks (last N bone-rotation snapshots each) ---
+    // pushUndo: snapshot current → undo, clear redo (new action invalidates
+    //   any redoable forward history — standard editor behavior).
+    // undo: snapshot current → redo, then pop undo and apply.
+    // redo: snapshot current → undo, then pop redo and apply.
     const MAX_UNDO = 40
-    const undoStack: Array<Record<string, [number, number, number, number]>> = []
+    type Snap = Record<string, [number, number, number, number]>
+    const undoStack: Snap[] = []
+    const redoStack: Snap[] = []
+    const captureCurrent = (): Snap =>
+      snapshotPose(ed.skeleton, '__snap__').rotations
     const pushUndo = () => {
-      const snap = snapshotPose(ed.skeleton, '__undo__')
-      undoStack.push(snap.rotations)
+      undoStack.push(captureCurrent())
       if (undoStack.length > MAX_UNDO) undoStack.shift()
+      redoStack.length = 0
     }
     const undo = () => {
       stopActiveAnimation()
       const prev = undoStack.pop()
       if (!prev) return false
+      redoStack.push(captureCurrent())
+      if (redoStack.length > MAX_UNDO) redoStack.shift()
       applyPose(ed.skeleton, { rotations: prev })
+      return true
+    }
+    const redo = () => {
+      stopActiveAnimation()
+      const next = redoStack.pop()
+      if (!next) return false
+      undoStack.push(captureCurrent())
+      if (undoStack.length > MAX_UNDO) undoStack.shift()
+      applyPose(ed.skeleton, { rotations: next })
       return true
     }
 
@@ -306,9 +349,76 @@ export function createEngine(
         activeAnimatables = playAnimation(scene, ed.skeleton, keyframes)
       },
       stopAnimation: () => stopActiveAnimation(),
+      listBakedAnimations: () =>
+        ed.animationGroups.map((g: any) => ({
+          name: g.name,
+          from: g.from,
+          to: g.to,
+        })),
+      // Sample a baked anim at frames, returning anchors + their times.
+      // `sampleCount === 0` → use the ORIGINAL keyframes the artist authored
+      // (union of every targeted bone's keyframe times). Otherwise sample at
+      // N evenly-spaced frames across the full range.
+      importBakedAnimation: (
+        animName: string,
+        sampleCount = 0,
+      ): { anchors: { name: string; rotations: Record<string, [number, number, number, number]> }[]; durations: number[] } | null => {
+        const group = ed.animationGroups.find((g: any) =>
+          g.name.toLowerCase().includes(animName.toLowerCase()),
+        )
+        if (!group) return null
+        const fromFrame: number = group.from
+        const toFrame: number = group.to
+        const fps = 30
+        let frames: number[] = []
+        if (sampleCount === 0) {
+          // Use the union of all keyframe times from every targeted bone
+          const set = new Set<number>()
+          for (const ta of group.targetedAnimations) {
+            const keys = ta.animation.getKeys()
+            for (const k of keys) {
+              if (k.frame >= fromFrame && k.frame <= toFrame) set.add(k.frame)
+            }
+          }
+          frames = Array.from(set).sort((a, b) => a - b)
+          if (frames.length < 2) {
+            // Fallback if the anim only has a single key somewhere
+            frames = [fromFrame, toFrame]
+          }
+        } else {
+          for (let i = 0; i < sampleCount; i++) {
+            const t = i / (sampleCount - 1)
+            frames.push(Math.round(fromFrame + (toFrame - fromFrame) * t))
+          }
+        }
+        // Start playing the group so goToFrame works, then pause + walk
+        stopActiveAnimation()
+        group.start(false, 1.0)
+        group.pause()
+        const anchors: {
+          name: string
+          rotations: Record<string, [number, number, number, number]>
+        }[] = []
+        const durations: number[] = []
+        for (let i = 0; i < frames.length; i++) {
+          group.goToFrame(frames[i])
+          // Force skeleton matrices to refresh
+          for (const s of ed.skeletons) s.prepare()
+          const snap = snapshotPose(ed.skeleton, `${animName}_${i + 1}`)
+          anchors.push({ name: snap.name, rotations: snap.rotations })
+          durations.push((frames[i] - fromFrame) / fps)
+        }
+        group.stop()
+        // Restore rest pose so the editor knight isn't stuck at the last
+        // sample's bones
+        applyPose(ed.skeleton, { rotations: ed.restPose })
+        return { anchors, durations }
+      },
       pushUndo,
       undo,
+      redo,
       canUndo: () => undoStack.length > 0,
+      canRedo: () => redoStack.length > 0,
       getSelectedBoneEuler,
       getInitialAnchor: () => ({
         id: '__initial__',

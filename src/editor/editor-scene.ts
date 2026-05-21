@@ -71,6 +71,7 @@ export type EditorSceneApi = {
   allBoneNames: string[]      // full list for the panel
   restPose: Record<string, [number, number, number, number]>
   position: Vector3
+  animationGroups: any[]      // baked anims from the GLB
 }
 
 export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> {
@@ -101,9 +102,9 @@ export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> 
         m.material = mat
       }
 
-      // Editor knight stays in rest pose
+      // Editor knight stays in rest pose — but keep the baked anim groups
+      // around so users can import them as anchors via the editor UI.
       result.animationGroups.forEach((g) => g.stop())
-      result.animationGroups.forEach((g) => g.dispose())
 
       // The Knight GLB has 8 skeletons sharing TransformNodes (one per mesh
       // group). All need prepare() every frame for bone edits to refresh
@@ -150,6 +151,7 @@ export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> 
         allBoneNames,
         restPose,
         position: POSITION.clone(),
+        animationGroups: result.animationGroups,
       }
     })
     .catch((err) => {

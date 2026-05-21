@@ -16,8 +16,8 @@ export type BonePicker = {
   dispose: () => void
 }
 
-// Creates a sphere only at bones in `activeBones` whitelist. Click to pick.
-// Selected sphere turns red, others stay yellow.
+// Creates a sphere at each active bone. Click to select. Selected sphere
+// turns red, others stay yellow.
 export function createBonePicker(
   scene: Scene,
   skeleton: Skeleton,
@@ -35,7 +35,6 @@ export function createBonePicker(
   red.specularColor = new Color3(0, 0, 0)
   red.alpha = 0.85
 
-  // Map bone name → sphere mesh
   const spheres = new Map<string, Mesh>()
   for (const boneName of activeBones) {
     const bone = skeleton.bones.find((b) => b.name === boneName)
@@ -72,7 +71,6 @@ export function createBonePicker(
   let currentSelection: string | null = null
 
   const setSphereSelected = (boneName: string | null) => {
-    // Reset previous to yellow
     if (currentSelection) {
       const prev = spheres.get(currentSelection)
       if (prev) prev.material = yellow
@@ -104,7 +102,6 @@ export function createBonePicker(
       } else if (pointerObserver) {
         scene.onPointerObservable.remove(pointerObserver)
         pointerObserver = null
-        // Clear selection visual on deactivate
         setSphereSelected(null)
       }
     },

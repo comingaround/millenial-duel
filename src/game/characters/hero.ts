@@ -9,6 +9,7 @@ import {
   StandardMaterial,
   Vector3,
 } from '@babylonjs/core'
+import { playAnimation, AnimationKeyframe } from '../../editor/animation-player'
 
 // Hero stands 3m behind the camera-default-stance. Faces +Z toward opponent.
 const POSITION = new Vector3(0, 0, -8)
@@ -154,10 +155,21 @@ export function createHero(scene: Scene): Promise<HeroApi | null> {
           `Strike:${slashAnim ? 'yes' : 'NO'} Block:${upperArmLNode ? 'yes' : 'NO'}`,
       )
 
-      const api: HeroApi = {
+      const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
+        combatIdle?.pause()
+        playAnimation(scene, skeleton, keyframes)
+        // After approximate duration, resume idle
+        const lastTime = keyframes[keyframes.length - 1]?.time ?? 0
+        setTimeout(() => combatIdle?.play(true), Math.max(50, lastTime * 1000 + 200))
+      }
+
+      const api: HeroApi & {
+        playCustomAnimation: (kfs: AnimationKeyframe[]) => void
+      } = {
         playStrike,
         playBlock,
         getHeadNode: () => headNode,
+        playCustomAnimation,
       }
       ;(window as any).__hero = api
       return api

@@ -100,16 +100,24 @@ export default function BoneControls() {
         <button
           style={miniBtnStyle}
           onClick={() => (window as any).__editor?.undo()}
+          title="Undo (Ctrl+Z)"
         >
           ↶ Undo
         </button>
         <button
           style={miniBtnStyle}
-          onClick={() => (window as any).__editor?.reset()}
+          onClick={() => (window as any).__editor?.redo()}
+          title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
         >
-          Reset
+          ↷ Redo
         </button>
       </div>
+      <button
+        style={resetBtnStyle}
+        onClick={() => (window as any).__editor?.reset()}
+      >
+        Reset to rest pose
+      </button>
     </div>
   )
 }
@@ -253,6 +261,8 @@ const panelStyle: CSSProperties = {
   overflowY: 'auto',
   display: 'flex',
   flexDirection: 'column',
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
 }
 
 const titleStyle: CSSProperties = {
@@ -355,6 +365,21 @@ const miniBtnStyle: CSSProperties = {
   fontWeight: 500,
 }
 
+const resetBtnStyle: CSSProperties = {
+  width: '100%',
+  marginTop: 8,
+  padding: '10px 8px',
+  background: 'rgba(200, 90, 90, 0.22)',
+  color: '#fff',
+  border: '1px solid rgba(220, 110, 110, 0.5)',
+  borderRadius: 4,
+  cursor: 'pointer',
+  fontSize: 12,
+  fontFamily: 'inherit',
+  fontWeight: 600,
+  letterSpacing: 0.3,
+}
+
 const knobWithReadoutStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
@@ -390,4 +415,7 @@ const knobLabelStyle: CSSProperties = {
   color: '#fff',
   textShadow: '0 1px 2px rgba(0,0,0,0.5)',
   pointerEvents: 'none',
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
 }
+

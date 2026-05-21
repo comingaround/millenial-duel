@@ -10,6 +10,7 @@ import {
   StandardMaterial,
   Vector3,
 } from '@babylonjs/core'
+import { playAnimation, AnimationKeyframe } from '../../editor/animation-player'
 
 const POSITION = new Vector3(0, 0, -5)
 
@@ -154,7 +155,16 @@ export function createOpponent(scene: Scene): Promise<OpponentApi | null> {
           `UpperArmL:${upperArmL ? 'yes' : 'NO'}`,
       )
 
-      const api: OpponentApi = { playSlash, playBlock }
+      const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
+        combatIdle?.pause()
+        playAnimation(scene, skeleton, keyframes)
+        const lastTime = keyframes[keyframes.length - 1]?.time ?? 0
+        setTimeout(() => combatIdle?.play(true), Math.max(50, lastTime * 1000 + 200))
+      }
+
+      const api: OpponentApi & {
+        playCustomAnimation: (kfs: AnimationKeyframe[]) => void
+      } = { playSlash, playBlock, playCustomAnimation }
       ;(window as any).__opponent = api
       return api
     })

@@ -1,6 +1,15 @@
 # Duel Game — Project Notes
 
-First-person sword-and-shield duel game (KCD-style). Web first, mobile later via Capacitor. Currently a working scene with hero (FP) + opponent (3rd-person target) and the first two combat animations (sword strike + shield block) on both characters.
+First-person sword-and-shield duel game (KCD-style). Web first, mobile later via Capacitor. Currently a working scene with hero (FP) + opponent (3rd-person target) and the first two combat animations (sword strike + shield block) on both characters. **Custom in-browser pose/animation editor is now operational** — used to author new attack/block animations bound to per-character keys, persisted to a JSON library.
+
+## ⚠️ Read this first (state after compaction)
+
+- ✅ Duel scene (hero + opponent + 2 baked-key animations) — same as before
+- ✅ Custom **pose/animation editor** at scene `(50, 0, 0)` — separate knight rig used purely as a posing puppet
+- ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, Initial Position anchor (auto, undeletable), rename via ✎ icon, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
+- ✅ Persistence: `public/custom-animations/library.json` via dev-only Vite middleware (`vite-plugins/animation-saver.ts`)
+- ✅ Key dispatch: engine.ts checks `window.__customAnims` first → falls back to default Q/U/Space/Enter
+- ⏳ No HP / damage / AI / HUD yet
 
 ## Stack
 
@@ -23,19 +32,23 @@ duel-game/
 ├── .claude/notes.md                     (this file)
 ├── public/
 │   ├── models/                          (GLBs, served as /models/*)
-│   │   ├── knight.glb                   reused for hero + opponent
+│   │   ├── knight.glb                   reused for hero + opponent + editor puppet
 │   │   ├── trees.glb                    8 low-poly trees (rendered as 1 unit)
 │   │   ├── house.glb, house-02.glb,
 │   │   ├── house-big.glb, house-dog.glb
 │   │   └── house-church.glb             converted, NOT rendered (looked off)
-│   └── textures/church/                 BaseColor + Normal (kept for church)
+│   ├── textures/church/                 BaseColor + Normal (kept for church)
+│   └── custom-animations/
+│       └── library.json                 persisted poses + anchors + animations
+├── vite-plugins/
+│   └── animation-saver.ts               dev-only middleware: GET/POST /api/animations
 ├── src/
 │   ├── main.tsx                         no StrictMode
-│   ├── App.tsx                          <Game /> + <CameraToggle />
+│   ├── App.tsx                          <Game /> + <CameraToggle /> + <EditorPanel />
 │   ├── App.css                          viewport reset
 │   ├── game/
 │   │   ├── Game.tsx                     canvas wrapper
-│   │   ├── engine.ts                    Engine, Scene, two cameras, key handlers
+│   │   ├── engine.ts                    Engine, Scene, three cameras, key handlers, editor wiring
 │   │   ├── lighting.ts                  hemi + directional sun
 │   │   ├── sky.ts                       sphere skybox (vertical gradient) + sun mesh
 │   │   ├── clouds.ts                    billboard cloud puffs scattered above scene
@@ -44,10 +57,18 @@ duel-game/
 │   │   │   ├── trees.ts                 loads trees.glb, places + colors
 │   │   │   └── buildings.ts             loads all house GLBs, auto-grounds via bbox
 │   │   └── characters/
-│   │       ├── opponent.ts              loads knight.glb, exposes playSlash/playBlock
-│   │       └── hero.ts                  loads knight.glb again, head hidden for FP
+│   │       ├── opponent.ts              loads knight.glb, exposes playSlash/playBlock + playCustomAnimation
+│   │       └── hero.ts                  loads knight.glb again, head hidden for FP, exposes playCustomAnimation
+│   ├── editor/                          ← in-browser pose/animation editor
+│   │   ├── editor-scene.ts              loads editor knight at (50,0,0), exports ACTIVE_BONES (19)
+│   │   ├── bone-picker.ts               yellow spheres at active bones, click-to-select (no drag)
+│   │   ├── pose-store.ts                snapshotPose / applyPose helpers
+│   │   ├── animation-player.ts          builds Babylon Animations from anchor keyframes
+│   │   ├── BoneControls.tsx             right panel: bone tree + 3 rotation knobs
+│   │   ├── EditorPanel.tsx              left dashboard: poses/anchors/animations + import modal
+│   │   └── gizmo.ts                     (legacy GizmoManager wiring, unused after drag removal)
 │   └── ui/
-│       └── CameraToggle.tsx             bottom-right Free Roam / Locked toggle
+│       └── CameraToggle.tsx             bottom-right Free Roam / Locked / Editor toggle
 └── (vite, tsconfig, package.json, etc.)
 ```
 
@@ -64,12 +85,13 @@ Both characters share `knight.glb` — same skeleton (35 bones, Blender-named), 
 
 ## Cameras + controls
 
-Two cameras switchable via the UI button bottom-right:
+Three cameras switchable via the UI button bottom-right:
 
 | Mode | Camera | Behaviour |
 |---|---|---|
 | **Free Roam** (default) | `ArcRotateCamera` | Orbits a target. Default target = opponent's head, radius 3m. Left-drag orbits, right-drag pans target, wheel zooms. Arrow keys translate the target (forward = camera's forward flattened to XZ). |
 | **Locked (FPS)** | `UniversalCamera` | Position is snapped to the hero's Head bone each frame via `scene.onBeforeRenderObservable`. Mouse-drag rotates the look direction. No keyboard movement. |
+| **Editor** | `ArcRotateCamera` | Frames the editor knight at world `(50, 0, 0)`. Opens left + right editor panels overlaid on the canvas. |
 
 Toggle implementation: `window.__bjs.setCameraMode('free' | 'locked')` — UI calls this. Each call swaps `scene.activeCamera` and attaches/detaches controls.
 
@@ -149,6 +171,150 @@ The current `Game.tsx` uses `useCallback`-wrapped handler so the engine doesn't 
 
 The React side just calls these. Avoids prop drilling and lets the headless Playwright QA also poke at the scene. Could be replaced with React context later when there's more UI to manage.
 
+## Pose / Animation Editor
+
+A complete in-browser animation authoring tool. Use the camera toggle to switch to **Editor** mode — the ArcRotateCamera frames a separate knight puppet at world `(50, 0, 0)`, a left-side dashboard appears for poses/anchors/animations, and a right-side panel for bone selection + rotation knobs.
+
+### Concepts
+
+| Term | What it is | Persisted? |
+|---|---|---|
+| **Pose** | A static snapshot of all bone rotations. For reference / starting points. | ✅ |
+| **Anchor** | An animation **keyframe**. Same data structure as a Pose, but used as a building block of animations. | ✅ |
+| **Initial Position** anchor | Auto-added, undeletable. Rendered as a virtual first entry — NOT stored in state, computed at render via `displayedAnchors = [initialAnchor, ...anchors]`. | Virtual |
+| **Animation** | An ordered list of `{anchor, time}` keyframes. Playback uses Babylon Animations + slerp. | ✅ |
+
+All persisted as JSON at `public/custom-animations/library.json`. Auto-save: 500ms debounced POST to `/api/animations` whenever poses/anchors/animations change. Auto-load: GET on mount.
+
+### Bone subset (`ACTIVE_BONES` in `editor-scene.ts`)
+
+19 combat-relevant bones only (out of 35 total in the rig):
+- **Torso/head (5):** Hips, Spine, Chest, Neck, Head
+- **Arms (8):** Shoulder.L/R, Upper Arm.L/R, Lower Arm.L/R, Hand.L/R
+- **Legs (6):** Upper Leg.L/R, Lower Leg.L/R, Foot.L/R
+
+Skipped: Fingers, Thumbs, Hand Hold (weapon attach), Toes, IK helpers.
+
+### Editor scene specifics
+
+- Editor knight loaded into the **main scene** at x=50 (not a separate scene) — the FPS camera + ArcRotateCamera see it from far away, the Editor camera frames it close.
+- All editor knight meshes are `isPickable = false` so only the bone-picker spheres receive clicks.
+- **Baked animations are kept (stopped, not disposed)** so the user can import them later via the modal.
+
+### Multi-skin `prepare()` lesson (critical)
+
+Knight GLB has **8 skeletons** that share TransformNodes (one skeleton per material primitive group). When you modify a bone's linked TransformNode rotation, only some of the 8 skinning matrices refresh — visible as one leg (e.g. Upper Leg.L) not updating while everything else does.
+
+**Fix:** Call `s.prepare()` on **all 8 skeletons** every frame:
+
+```ts
+scene.onBeforeRenderObservable.add(() => {
+  for (const s of skeletons) s.prepare()
+})
+```
+
+`editor-scene.ts` collects them by walking the mesh hierarchy under the root and inserting `m.skeleton` into a Set.
+
+### Bone-picker (click-only)
+
+`bone-picker.ts`:
+- Creates a yellow sphere mesh at each ACTIVE_BONE's world position
+- Per-frame sync of sphere positions to their bones (bones move when rotations change)
+- POINTERDOWN on a sphere fires `onSelect(boneName)`
+- Selected bone's sphere swaps to red material
+
+**Drag was implemented then removed** — both ribbon-tangent screen-space mapping (Model A) and full IK (Model B) were tried; user found drag UX unsalvageable for 3D rotation via 2D mouse motion. The knob rotation in `BoneControls.tsx` is what shipped.
+
+### Bone rotation UI (`BoneControls.tsx`)
+
+- Bone tree on top, categorized by Torso / Left Arm / Right Arm / Left Leg / Right Leg / IK Helpers via `categorize()` function
+- Bottom: 3 vertical 90×90 sphere knobs (X red, Y green, Z blue) — drag vertically to rotate, sensitivity 0.008 rad/pixel
+- Each knob shows current Euler degree readout
+- `userSelect: 'none'` on panel + labels so dragging knobs doesn't select text
+- Undo + Reset buttons
+
+### Animation builder + player
+
+`animation-player.ts` `playAnimation(scene, skeleton, keyframes[])`:
+1. Sort keyframes by time, drop duplicates within 0.001s
+2. If first keyframe time > 0.001s, **prepend implicit frame 0 = current bone state** (so animation doesn't snap at start)
+3. For each affected bone, build a Babylon `Animation` (rotationQuaternion track at 30fps) with the keys it has rotations for
+4. `scene.beginDirectAnimation(node, animations, 0, lastFrame)` returns Animatable[] for cancellation
+
+If a bone has only 1 key, it's skipped (`keys.length < 2` continue).
+
+### Import-baked-animation modal
+
+Opens via ⬇ button next to "Save Anchor". Shows:
+- Dropdown of baked animations from the editor knight's GLB (with frame counts)
+- Radio: **Original** (uses union of all targeted animations' `getKeys()` frames — most faithful) vs **Custom count** (default 8, range 2-30, evenly samples the timeline)
+- On import: `engine.ts`'s `importBakedAnimation(name, sampleCount)` is called. `sampleCount=0` means Original mode.
+- Creates N anchors named `{anim}_{frameIdx}` + one Animation tying them together
+
+**Sample-count guidance (empirical):**
+
+| Motion | Samples |
+|---|---|
+| Idle breathing / head nod | 3-5 |
+| Single-axis swing (block raise) | 5-7 |
+| Multi-bone action (sword strike) | 8-15 |
+| Complex full-body | 15-25 |
+
+Lower counts can fail visibly because quaternion slerp takes the geometrically shortest arc, which may not match the artist's authored rotation path. The user accepted 5+ as the working minimum for the slash anim.
+
+### Key bindings
+
+Each Animation row in EditorPanel has two text inputs: **Hero key** and **Opp key** (single character). On save, the resolved animation list is exposed to `window.__customAnims = [{name, resolved, heroKey, oppKey}, ...]`.
+
+In `engine.ts` key handler, custom bindings are checked **before** the default Q/U/Space/Enter:
+
+```ts
+const customAnims = (window as any).__customAnims
+if (customAnims) {
+  for (const ca of customAnims) {
+    if (ca.heroKey && ca.heroKey === key) {
+      (window as any).__hero?.playCustomAnimation?.(ca.resolved); return
+    }
+    if (ca.oppKey && ca.oppKey === key) {
+      (window as any).__opponent?.playCustomAnimation?.(ca.resolved); return
+    }
+  }
+}
+```
+
+Hero/opponent each expose `playCustomAnimation(keyframes)`:
+```ts
+const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
+  combatIdle?.pause()
+  playAnimation(scene, skeleton, keyframes)
+  const lastTime = keyframes[keyframes.length - 1]?.time ?? 0
+  setTimeout(() => combatIdle?.play(true), Math.max(50, lastTime * 1000 + 200))
+}
+```
+
+### Persistence: Vite dev plugin
+
+`vite-plugins/animation-saver.ts` is dev-only. Loaded in `vite.config.ts` via `animationSaverPlugin()`. Adds two endpoints via `configureServer` middleware:
+
+- `GET /api/animations` → reads `public/custom-animations/library.json`, returns empty object if missing
+- `POST /api/animations` → writes JSON body to disk
+
+For production this won't work — would need a real backend or save-to-disk-via-File-System-Access-API. Currently just a dev affordance.
+
+### Race-condition gotcha (Initial anchor)
+
+The Initial Position anchor used to be stored in state and inserted by both an async fetch from `/api/animations` and a sync editor-ready probe. Whichever ran `setAnchors` second won → Initial sometimes vanished.
+
+**Fix:** Don't store it. Compute `displayedAnchors = [initialAnchor, ...anchors]` at render time using the editor's resolved rest pose. Filter persisted anchors to exclude `system: true` before POST.
+
+### Window globals (current)
+
+- `window.__bjs` = `{engine, scene, camera, fpCam, editorCam, setCameraMode}`
+- `window.__hero` = `{playStrike, playBlock, getHeadNode, playCustomAnimation}`
+- `window.__opponent` = `{playSlash, playBlock, playCustomAnimation}`
+- `window.__editor` = `{playAnimation, pushUndo, undo, reset, getSelectedBoneEuler, getInitialAnchor, listBakedAnimations, importBakedAnimation, ...}`
+- `window.__customAnims` = resolved custom animations with key bindings
+
 ## Asset pipeline (FBX → GLB)
 
 All character/building/tree models came as FBX or OBJ from CGTrader. We convert to GLB at scaffold time:
@@ -216,20 +382,33 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - Scene with sky, sun, clouds, grass, trees, buildings
 - Hero + opponent both rendered with the same knight model
 - Hero in FP view (head hidden, body visible from 3rd-person)
-- Two cameras + UI toggle
+- Three cameras + UI toggle (Free Roam / Locked / Editor)
 - Q/Space (hero) and U/Enter (opponent) → strike + block animations
 - Combat_idle looping on both, pauses cleanly when other animations play
 - Arrow-key camera movement (no page scroll)
+- **In-browser pose/animation editor** with bone-pick, knob rotation, anchors, animation builder, library persistence, import-baked, per-character key bindings
 
 ⏳ **Pending:**
 - HP system + damage timing
 - Block-window mechanic (cancel damage if blocked in time)
-- Additional strikes (left/right) — only one slash exists, would need to mirror or hand-author
-- Dodges (left/right) — would need procedural animations
-- Hit-react / block-react / death animations
+- Additional strikes (left/right) — author via editor; one slash mirror would also work
+- Dodges (left/right) — author via editor
+- Hit-react / block-react / death animations — author via editor
 - NPC AI for opponent
 - HUD: HP bars, key hints, attack-warning corners
 - Mouse-look for hero in Locked camera (currently click-drag)
+- Production-safe persistence (current `/api/animations` is dev-only Vite middleware)
+
+## Lessons captured (session ending 2026-05-21)
+
+1. **Multi-skin GLBs need `prepare()` on every skeleton, every frame.** Knight has 8. Modifying a TransformNode that's linked from one bone won't refresh other skeletons' skinning matrices reliably. Symptom: one specific bone (e.g. Upper Leg.L) doesn't move while every other bone does.
+2. **Drag-to-rotate bones in 3D is genuinely hard.** Tried ribbon-tangent projection (Model A) and full IK (Model B). Both inverted in ways the user found unintuitive. The final UX is sphere-click to select + 3 axis knobs to rotate. Avoid relitigating.
+3. **`bone._linkedTransformNode` is the actual handle, not the bone.** Direct `scene.beginDirectAnimation(bone, ...)` silently fails — animate the linked TransformNode.
+4. **Quaternion slerp takes the shortest arc.** Sparse keyframes for complex motions produce wrong-looking interpolations. Sample-count heuristics now in the Import section above.
+5. **Animations need an implicit frame 0.** If user authors an animation starting at t=0.5s, prepend frame 0 = current bone state so it doesn't snap.
+6. **Virtual list entries beat stateful "system" entries.** Initial Position anchor lives in render-time computed `displayedAnchors`, not React state. Eliminated a race condition between fetch hydrate + editor-ready probe.
+7. **Dev-only Vite middleware is the cheap way to read/write JSON from the browser** during local dev. `configureServer` + `app.use` + check `req.url`. Won't survive prod build — fine for an author-time tool.
+8. **3-frame imports of complex baked animations look broken.** Not a bug — slerp limitation. 5+ is the user's working minimum for sword_atk01.
 
 ## What we tried and rejected
 
