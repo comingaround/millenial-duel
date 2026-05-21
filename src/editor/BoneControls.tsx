@@ -83,6 +83,12 @@ export default function BoneControls() {
         <Knob axis="z" label="Z" color="#3a82e6" disabled={!enabled} />
       </div>
       <div style={hintStyle}>drag ↔ horizontally</div>
+      <button
+        style={resetBtnStyle}
+        onClick={() => (window as any).__editor?.reset()}
+      >
+        Reset to rest
+      </button>
     </div>
   )
 }
@@ -232,7 +238,7 @@ const boneListStyle: CSSProperties = {
   background: 'rgba(0, 0, 0, 0.22)',
   borderRadius: 4,
   padding: 4,
-  maxHeight: 320,
+  maxHeight: 240,
   overflowY: 'auto',
   marginBottom: 4,
 }
@@ -290,6 +296,19 @@ const hintStyle: CSSProperties = {
   fontSize: 10,
   opacity: 0.45,
   textAlign: 'center',
+}
+
+const resetBtnStyle: CSSProperties = {
+  marginTop: 12,
+  padding: '8px 12px',
+  background: 'transparent',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.22)',
+  borderRadius: 4,
+  cursor: 'pointer',
+  fontSize: 12,
+  fontFamily: 'inherit',
+  fontWeight: 500,
 }
 
 const knobStyle: CSSProperties = {

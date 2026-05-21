@@ -62,7 +62,6 @@ export default function EditorPanel() {
   const onApplyPose = (pose: Pose) => window.__editor?.apply(pose)
   const onDeletePose = (id: string) =>
     setPoses((prev) => prev.filter((p) => p.id !== id))
-  const onReset = () => window.__editor?.reset()
 
   return (
     <div style={panelStyle}>
@@ -86,7 +85,6 @@ export default function EditorPanel() {
         >
           Save Animation
         </button>
-        <button style={btnGhost} onClick={onReset}>Reset to rest</button>
       </div>
 
       <div style={sectionStyle}>
@@ -179,11 +177,6 @@ const btnPrimary: CSSProperties = {
   fontWeight: 500,
 }
 const btnSecondary: CSSProperties = { ...btnPrimary, background: 'rgba(255,255,255,0.07)' }
-const btnGhost: CSSProperties = {
-  ...btnPrimary,
-  background: 'transparent',
-  border: '1px solid rgba(255, 255, 255, 0.18)',
-}
 
 const emptyStyle: CSSProperties = { opacity: 0.4, fontSize: 12, padding: '4px 0' }
 

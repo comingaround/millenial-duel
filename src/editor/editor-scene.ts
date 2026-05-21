@@ -13,16 +13,29 @@ import {
 // Standalone editor knight, isolated from the duel scene.
 const POSITION = new Vector3(50, 0, 0)
 
-// Active bones: arms + legs (toes intentionally skipped).
-//   Arms — Shoulder/elbow/wrist rotations via Upper Arm / Lower Arm / Hand
-//   Legs — Hip/knee/ankle rotations via Upper Leg / Lower Leg / Foot
+// Active bones: combat-relevant subset of the rig.
+//   Torso/head — Hips (whole-body lean), Spine, Chest, Neck, Head
+//   Shoulders  — clavicle bones, for shrug + arm-base placement
+//   Arms       — Upper Arm / Lower Arm / Hand
+//   Legs       — Upper Leg / Lower Leg / Foot
+// Skipped: Fingers, Thumbs, Hand Hold (weapon attach), Toes, IK helpers.
 export const ACTIVE_BONES: readonly string[] = [
+  // torso + head (5)
+  'Hips',
+  'Spine',
+  'Chest',
+  'Neck',
+  'Head',
+  // arms (8 incl. clavicles)
+  'Shoulder.L',
+  'Shoulder.R',
   'Upper Arm.L',
   'Upper Arm.R',
   'Lower Arm.L',
   'Lower Arm.R',
   'Hand.L',
   'Hand.R',
+  // legs (6)
   'Upper Leg.L',
   'Upper Leg.R',
   'Lower Leg.L',
