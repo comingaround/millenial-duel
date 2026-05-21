@@ -1,21 +1,27 @@
 import { CSSProperties, useEffect, useState } from 'react'
 
-type Pose = {
-  id: string
-  name: string
-  rotations: Record<string, [number, number, number, number]>
-}
+type RotationMap = Record<string, [number, number, number, number]>
+
+type Pose = { id: string; name: string; rotations: RotationMap }
+type Anchor = { id: string; name: string; rotations: RotationMap; system?: boolean }
+
+type AnimKeyframe = { anchorId: string; time: number }
+type AnimDef = { id: string; name: string; keyframes: AnimKeyframe[] }
+
+type DraftAnim = { name: string; keyframes: AnimKeyframe[] }
 
 type EditorApi = {
   snapshot: (name: string) => Pose
-  apply: (pose: { rotations: Record<string, [number, number, number, number]> }) => void
+  apply: (pose: { rotations: RotationMap }) => void
   reset: () => void
   selectBone: (name: string | null) => void
-  rotateSelectedBone: (axis: 'x' | 'y' | 'z', deltaRad: number) => void
   getSelectedBone: () => string | null
-  getActiveBones: () => string[]
-  getAllBoneNames: () => string[]
   addBoneSelectListener: (cb: (name: string | null) => void) => () => void
+  playAnimation: (keyframes: Array<{ anchor: { rotations: RotationMap }; time: number }>) => void
+  stopAnimation: () => void
+  pushUndo: () => void
+  undo: () => boolean
+  getInitialAnchor: () => Anchor
 }
 
 declare global {
@@ -27,41 +33,214 @@ declare global {
 export default function EditorPanel() {
   const [selectedBone, setSelectedBone] = useState<string | null>(null)
   const [poses, setPoses] = useState<Pose[]>([])
+  const [anchors, setAnchors] = useState<Anchor[]>([])
+  const [animations, setAnimations] = useState<AnimDef[]>([])
+  const [draft, setDraft] = useState<DraftAnim | null>(null)
+  const [hydrated, setHydrated] = useState(false)
 
+  // Load saved library from disk (dev plugin endpoint), then attach to editor
   useEffect(() => {
     let unsub: (() => void) | null = null
+    let cancelled = false
+
+    const hydrate = async () => {
+      try {
+        const res = await fetch('/api/animations')
+        if (res.ok) {
+          const data = await res.json()
+          if (cancelled) return
+          if (Array.isArray(data.poses))      setPoses(data.poses)
+          if (Array.isArray(data.anchors))    setAnchors(data.anchors)
+          if (Array.isArray(data.animations)) setAnimations(data.animations)
+        }
+      } catch {
+        // No persistence endpoint (e.g. production build) — silent
+      }
+      setHydrated(true)
+    }
+    hydrate()
+
     const tryAttach = () => {
       const ed = window.__editor
       if (!ed) return false
       unsub = ed.addBoneSelectListener((name) => setSelectedBone(name))
       setSelectedBone(ed.getSelectedBone())
+      // Auto-add Initial Position anchor (can't be deleted, not persisted)
+      const initial = ed.getInitialAnchor?.()
+      if (initial) {
+        setAnchors((curr) =>
+          curr.some((a) => a.id === initial.id) ? curr : [initial, ...curr],
+        )
+      }
       return true
     }
     if (!tryAttach()) {
-      const interval = setInterval(() => {
-        if (tryAttach()) clearInterval(interval)
+      const i = setInterval(() => {
+        if (tryAttach()) clearInterval(i)
       }, 200)
       return () => {
-        clearInterval(interval)
+        cancelled = true
+        clearInterval(i)
         unsub?.()
       }
     }
-    return () => unsub?.()
+    return () => {
+      cancelled = true
+      unsub?.()
+    }
   }, [])
+
+  // Persist library to disk on every change (debounced 500ms). Skip during
+  // initial hydration so we don't immediately overwrite the loaded data
+  // with the empty default state.
+  useEffect(() => {
+    if (!hydrated) return
+    const timer = setTimeout(() => {
+      const payload = {
+        poses,
+        anchors: anchors.filter((a) => !a.system), // skip Initial position
+        animations,
+      }
+      fetch('/api/animations', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload, null, 2),
+      }).catch(() => {})
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [poses, anchors, animations, hydrated])
 
   const onSavePose = () => {
     const ed = window.__editor
     if (!ed) return
-    const defaultName = `Pose ${poses.length + 1}`
-    const name = window.prompt('Pose name:', defaultName)
+    const name = window.prompt('Pose name:', `Pose ${poses.length + 1}`)
     if (!name) return
-    const pose = ed.snapshot(name)
-    setPoses((prev) => [...prev, pose])
+    const snap = ed.snapshot(name)
+    setPoses((p) => [...p, snap])
   }
 
-  const onApplyPose = (pose: Pose) => window.__editor?.apply(pose)
-  const onDeletePose = (id: string) =>
-    setPoses((prev) => prev.filter((p) => p.id !== id))
+  const onSaveAnchor = () => {
+    const ed = window.__editor
+    if (!ed) return
+    const name = window.prompt('Anchor name:', `Anchor ${anchors.length + 1}`)
+    if (!name) return
+    const snap = ed.snapshot(name)
+    setAnchors((a) => [...a, snap])
+  }
+
+  const onApplyPose = (p: Pose) => {
+    window.__editor?.pushUndo()
+    window.__editor?.apply(p)
+  }
+  const onApplyAnchor = (a: Anchor) => {
+    window.__editor?.pushUndo()
+    window.__editor?.apply(a)
+  }
+
+  const onDeletePose = (id: string) => setPoses((p) => p.filter((x) => x.id !== id))
+  const onDeleteAnchor = (id: string) =>
+    setAnchors((a) => a.filter((x) => x.id !== id || x.system))
+
+  const onRenamePose = (id: string, newName: string) =>
+    setPoses((p) => p.map((x) => (x.id === id ? { ...x, name: newName } : x)))
+  const onRenameAnchor = (id: string, newName: string) =>
+    setAnchors((a) => a.map((x) => (x.id === id ? { ...x, name: newName } : x)))
+  const onRenameAnimation = (id: string, newName: string) =>
+    setAnimations((a) => a.map((x) => (x.id === id ? { ...x, name: newName } : x)))
+
+  const promptRename = (currentName: string, apply: (next: string) => void) => () => {
+    const next = window.prompt('Rename to:', currentName)
+    if (!next) return
+    const trimmed = next.trim()
+    if (!trimmed) return
+    apply(trimmed)
+  }
+  const onDeleteAnimation = (id: string) =>
+    setAnimations((a) => a.filter((x) => x.id !== id))
+
+  // --- Animation builder ---
+
+  const onNewAnimation = () => {
+    if (anchors.length < 2) {
+      alert('Save at least 2 anchors before building an animation.')
+      return
+    }
+    setDraft({
+      name: `Animation ${animations.length + 1}`,
+      keyframes: [],
+    })
+  }
+
+  const onAddKeyframe = () => {
+    if (!draft) return
+    const first = anchors[0]
+    if (!first) return
+    const lastTime = draft.keyframes[draft.keyframes.length - 1]?.time ?? 0
+    setDraft({
+      ...draft,
+      keyframes: [
+        ...draft.keyframes,
+        { anchorId: first.id, time: +(lastTime + 0.3).toFixed(2) },
+      ],
+    })
+  }
+
+  const onUpdateKeyframe = (idx: number, updates: Partial<AnimKeyframe>) => {
+    if (!draft) return
+    setDraft({
+      ...draft,
+      keyframes: draft.keyframes.map((k, i) => (i === idx ? { ...k, ...updates } : k)),
+    })
+  }
+
+  const onRemoveKeyframe = (idx: number) => {
+    if (!draft) return
+    setDraft({
+      ...draft,
+      keyframes: draft.keyframes.filter((_, i) => i !== idx),
+    })
+  }
+
+  const resolveKeyframes = (kfs: AnimKeyframe[]) =>
+    kfs
+      .map((kf) => {
+        const anchor = anchors.find((a) => a.id === kf.anchorId)
+        return anchor ? { anchor: { rotations: anchor.rotations }, time: kf.time } : null
+      })
+      .filter((x): x is { anchor: { rotations: RotationMap }; time: number } => x !== null)
+
+  const onPreviewDraft = () => {
+    if (!draft) return
+    const resolved = resolveKeyframes(draft.keyframes)
+    if (resolved.length < 2) {
+      alert('Need at least 2 keyframes to preview.')
+      return
+    }
+    window.__editor?.playAnimation(resolved)
+  }
+
+  const onSaveDraft = () => {
+    if (!draft) return
+    if (draft.keyframes.length < 2) {
+      alert('Need at least 2 keyframes.')
+      return
+    }
+    const newAnim: AnimDef = {
+      id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `anim_${Date.now()}`,
+      name: draft.name,
+      keyframes: draft.keyframes,
+    }
+    setAnimations((a) => [...a, newAnim])
+    setDraft(null)
+  }
+
+  const onPlayAnimation = (anim: AnimDef) => {
+    const resolved = resolveKeyframes(anim.keyframes)
+    if (resolved.length < 2) return
+    window.__editor?.playAnimation(resolved)
+  }
 
   return (
     <div style={panelStyle}>
@@ -71,52 +250,190 @@ export default function EditorPanel() {
         <div style={labelStyle}>Selected</div>
         <div style={boneStyle}>
           {selectedBone ?? (
-            <span style={{ opacity: 0.4 }}>(none — pick from right panel)</span>
+            <span style={{ opacity: 0.4 }}>(pick from right panel)</span>
           )}
         </div>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 18 }}>
+      {/* Save buttons */}
+      <div style={btnRowStyle}>
         <button style={btnPrimary} onClick={onSavePose}>Save Pose</button>
-        <button
-          style={{ ...btnSecondary, opacity: 0.35, cursor: 'not-allowed' }}
-          disabled
-          title="Available in Phase 2"
-        >
-          Save Animation
-        </button>
+        <button style={btnSecondary} onClick={onSaveAnchor}>Save Anchor</button>
       </div>
 
-      <div style={sectionStyle}>
-        <div style={labelStyle}>Poses ({poses.length})</div>
+      {/* Poses */}
+      <Section label={`Poses (${poses.length})`}>
         {poses.length === 0 ? (
-          <div style={emptyStyle}>(none yet)</div>
+          <Empty text="(none)" />
         ) : (
           poses.map((p) => (
-            <div key={p.id} style={poseRowStyle}>
-              <span
-                style={{ cursor: 'pointer', flex: 1 }}
-                onClick={() => onApplyPose(p)}
-                title="Apply this pose"
-              >
-                {p.name}
-              </span>
-              <span
-                style={delStyle}
-                onClick={() => onDeletePose(p.id)}
-                title="Delete"
-              >
-                ×
-              </span>
-            </div>
+            <ListRow
+              key={p.id}
+              name={p.name}
+              onClick={() => onApplyPose(p)}
+              onDelete={() => onDeletePose(p.id)}
+              onRename={promptRename(p.name, (n) => onRenamePose(p.id, n))}
+            />
           ))
         )}
-      </div>
+      </Section>
 
-      <div style={sectionStyle}>
-        <div style={labelStyle}>Animations</div>
-        <div style={emptyStyle}>Phase 2</div>
-      </div>
+      {/* Anchors */}
+      <Section label={`Anchors (${anchors.length})`}>
+        {anchors.length === 0 ? (
+          <Empty text="(save anchors to build animations)" />
+        ) : (
+          anchors.map((a) => (
+            <ListRow
+              key={a.id}
+              name={a.name}
+              onClick={() => onApplyAnchor(a)}
+              onDelete={a.system ? undefined : () => onDeleteAnchor(a.id)}
+              onRename={a.system ? undefined : promptRename(a.name, (n) => onRenameAnchor(a.id, n))}
+            />
+          ))
+        )}
+      </Section>
+
+      {/* Animation builder */}
+      {draft ? (
+        <div style={builderStyle}>
+          <div style={labelStyle}>New Animation</div>
+          <input
+            type="text"
+            value={draft.name}
+            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+            style={inputStyle}
+          />
+          <div style={{ ...labelStyle, marginTop: 8 }}>Keyframes</div>
+          {draft.keyframes.length === 0 ? (
+            <Empty text="(add anchor keyframes below)" />
+          ) : (
+            draft.keyframes.map((kf, idx) => (
+              <div key={idx} style={keyframeRowStyle}>
+                <select
+                  value={kf.anchorId}
+                  onChange={(e) => onUpdateKeyframe(idx, { anchorId: e.target.value })}
+                  style={selectStyle}
+                >
+                  {anchors.map((a) => (
+                    <option
+                      key={a.id}
+                      value={a.id}
+                      style={{ background: '#1c1f24', color: '#fff' }}
+                    >
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  step={0.05}
+                  min={0}
+                  value={kf.time}
+                  onChange={(e) =>
+                    onUpdateKeyframe(idx, { time: parseFloat(e.target.value) || 0 })
+                  }
+                  style={timeInputStyle}
+                />
+                <span style={{ fontSize: 10, opacity: 0.5 }}>s</span>
+                <span style={delStyle} onClick={() => onRemoveKeyframe(idx)}>
+                  ×
+                </span>
+              </div>
+            ))
+          )}
+          <button style={btnGhost} onClick={onAddKeyframe}>
+            + Add keyframe
+          </button>
+          <div style={btnRowStyle}>
+            <button style={btnPrimary} onClick={onPreviewDraft}>▶ Preview</button>
+            <button style={btnSecondary} onClick={onSaveDraft}>Save</button>
+          </div>
+          <button
+            style={{ ...btnGhost, marginTop: 4 }}
+            onClick={() => setDraft(null)}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button style={btnNewAnim} onClick={onNewAnimation}>
+          + New Animation
+        </button>
+      )}
+
+      {/* Animations */}
+      <Section label={`Animations (${animations.length})`}>
+        {animations.length === 0 ? (
+          <Empty text="(none)" />
+        ) : (
+          animations.map((a) => (
+            <ListRow
+              key={a.id}
+              name={a.name}
+              suffix={`(${a.keyframes.length} kfs)`}
+              onClick={() => onPlayAnimation(a)}
+              onDelete={() => onDeleteAnimation(a.id)}
+              onRename={promptRename(a.name, (n) => onRenameAnimation(a.id, n))}
+              icon="▶"
+            />
+          ))
+        )}
+      </Section>
+    </div>
+  )
+}
+
+function Section({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={sectionStyle}>
+      <div style={labelStyle}>{label}</div>
+      {children}
+    </div>
+  )
+}
+
+function Empty({ text }: { text: string }) {
+  return <div style={emptyStyle}>{text}</div>
+}
+
+function ListRow({
+  name,
+  suffix,
+  onClick,
+  onDelete,
+  onRename,
+  icon,
+}: {
+  name: string
+  suffix?: string
+  onClick: () => void
+  onDelete?: () => void
+  onRename?: () => void
+  icon?: string
+}) {
+  return (
+    <div style={poseRowStyle}>
+      <span style={{ cursor: 'pointer', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} onClick={onClick}>
+        {icon ? <span style={{ marginRight: 6, opacity: 0.7 }}>{icon}</span> : null}
+        {name}
+        {suffix ? <span style={{ marginLeft: 6, opacity: 0.45, fontSize: 10 }}>{suffix}</span> : null}
+      </span>
+      {onRename ? (
+        <span style={penStyle} onClick={onRename} title="Rename">
+          ✎
+        </span>
+      ) : null}
+      {onDelete ? (
+        <span style={delStyle} onClick={onDelete} title="Delete">
+          ×
+        </span>
+      ) : (
+        <span style={{ ...delStyle, opacity: 0.15, cursor: 'default' }} title="System anchor">
+          •
+        </span>
+      )}
     </div>
   )
 }
@@ -126,7 +443,7 @@ const panelStyle: CSSProperties = {
   left: 0,
   top: 0,
   bottom: 0,
-  width: 240,
+  width: 260,
   background: 'rgba(20, 22, 25, 0.92)',
   color: '#fff',
   padding: 14,
@@ -165,8 +482,15 @@ const boneStyle: CSSProperties = {
   minHeight: 20,
 }
 
+const btnRowStyle: CSSProperties = {
+  display: 'flex',
+  gap: 6,
+  marginBottom: 12,
+}
+
 const btnPrimary: CSSProperties = {
-  padding: '8px 12px',
+  flex: 1,
+  padding: '7px 10px',
   background: 'rgba(95, 130, 200, 0.55)',
   color: '#fff',
   border: '1px solid rgba(255, 255, 255, 0.15)',
@@ -176,9 +500,30 @@ const btnPrimary: CSSProperties = {
   fontFamily: 'inherit',
   fontWeight: 500,
 }
-const btnSecondary: CSSProperties = { ...btnPrimary, background: 'rgba(255,255,255,0.07)' }
 
-const emptyStyle: CSSProperties = { opacity: 0.4, fontSize: 12, padding: '4px 0' }
+const btnSecondary: CSSProperties = {
+  ...btnPrimary,
+  background: 'rgba(255, 255, 255, 0.07)',
+}
+
+const btnGhost: CSSProperties = {
+  ...btnPrimary,
+  flex: 'unset',
+  width: '100%',
+  background: 'transparent',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  padding: '6px 10px',
+  fontSize: 11,
+}
+
+const btnNewAnim: CSSProperties = {
+  ...btnGhost,
+  marginBottom: 14,
+  borderStyle: 'dashed',
+  fontWeight: 500,
+}
+
+const emptyStyle: CSSProperties = { opacity: 0.4, fontSize: 11, padding: '4px 0' }
 
 const poseRowStyle: CSSProperties = {
   display: 'flex',
@@ -193,7 +538,68 @@ const poseRowStyle: CSSProperties = {
 const delStyle: CSSProperties = {
   opacity: 0.5,
   cursor: 'pointer',
-  marginLeft: 8,
+  marginLeft: 6,
   fontWeight: 700,
   padding: '0 4px',
+}
+
+const penStyle: CSSProperties = {
+  opacity: 0.45,
+  cursor: 'pointer',
+  marginLeft: 4,
+  fontSize: 11,
+  padding: '0 4px',
+}
+
+const builderStyle: CSSProperties = {
+  background: 'rgba(0, 0, 0, 0.25)',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  borderRadius: 6,
+  padding: 10,
+  marginBottom: 14,
+}
+
+const inputStyle: CSSProperties = {
+  width: '100%',
+  padding: '5px 8px',
+  background: 'rgba(255, 255, 255, 0.07)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 3,
+  fontFamily: 'inherit',
+  fontSize: 12,
+  outline: 'none',
+  marginBottom: 4,
+}
+
+const keyframeRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  padding: '3px 0',
+  fontSize: 11,
+}
+
+const selectStyle: CSSProperties = {
+  flex: 1,
+  background: 'rgba(255, 255, 255, 0.07)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 3,
+  padding: '3px 4px',
+  fontFamily: 'inherit',
+  fontSize: 11,
+  outline: 'none',
+}
+
+const timeInputStyle: CSSProperties = {
+  width: 50,
+  background: 'rgba(255, 255, 255, 0.07)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 3,
+  padding: '3px 4px',
+  fontFamily: 'inherit',
+  fontSize: 11,
+  outline: 'none',
 }

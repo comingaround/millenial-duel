@@ -1,11 +1,12 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { animationSaverPlugin } from './vite-plugins/animation-saver'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), animationSaverPlugin()],
   server: {
-    host: true,        // bind to 0.0.0.0 → exposes a Network URL
+    host: true,
     port: 5173,
-    strictPort: true,  // fail rather than silently shift port
+    strictPort: true,
   },
 })

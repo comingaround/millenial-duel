@@ -7,6 +7,7 @@ export default function BoneControls() {
   const [selected, setSelected] = useState<string | null>(null)
   const [activeBones, setActiveBones] = useState<string[]>([])
   const [allBones, setAllBones] = useState<string[]>([])
+  const [euler, setEuler] = useState<{ x: number; y: number; z: number } | null>(null)
 
   useEffect(() => {
     let unsub: (() => void) | null = null
@@ -29,6 +30,18 @@ export default function BoneControls() {
       }
     }
     return () => unsub?.()
+  }, [])
+
+  // Poll the selected bone's Euler angles each frame for the readout.
+  useEffect(() => {
+    let rafId = 0
+    const tick = () => {
+      const e = (window as any).__editor?.getSelectedBoneEuler?.()
+      setEuler(e ?? null)
+      rafId = requestAnimationFrame(tick)
+    }
+    rafId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafId)
   }, [])
 
   const activeSet = new Set(activeBones)
@@ -78,17 +91,40 @@ export default function BoneControls() {
         {selected ?? '(no bone selected)'}
       </div>
       <div style={knobRowStyle}>
-        <Knob axis="x" label="X" color="#e64545" disabled={!enabled} />
-        <Knob axis="y" label="Y" color="#4cbd49" disabled={!enabled} />
-        <Knob axis="z" label="Z" color="#3a82e6" disabled={!enabled} />
+        <KnobWithReadout axis="x" label="X" color="#e64545" value={euler?.x} disabled={!enabled} />
+        <KnobWithReadout axis="y" label="Y" color="#4cbd49" value={euler?.y} disabled={!enabled} />
+        <KnobWithReadout axis="z" label="Z" color="#3a82e6" value={euler?.z} disabled={!enabled} />
       </div>
       <div style={hintStyle}>drag ↔ horizontally</div>
-      <button
-        style={resetBtnStyle}
-        onClick={() => (window as any).__editor?.reset()}
-      >
-        Reset to rest
-      </button>
+      <div style={btnGroupStyle}>
+        <button
+          style={miniBtnStyle}
+          onClick={() => (window as any).__editor?.undo()}
+        >
+          ↶ Undo
+        </button>
+        <button
+          style={miniBtnStyle}
+          onClick={() => (window as any).__editor?.reset()}
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function KnobWithReadout({
+  axis, label, color, value, disabled,
+}: {
+  axis: Axis; label: string; color: string; value: number | undefined; disabled: boolean
+}) {
+  return (
+    <div style={knobWithReadoutStyle}>
+      <Knob axis={axis} label={label} color={color} disabled={disabled} />
+      <div style={readoutStyle}>
+        {value !== undefined ? `${value.toFixed(0)}°` : '—'}
+      </div>
     </div>
   )
 }
@@ -110,6 +146,8 @@ function Knob({
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (disabled) return
+    // Snapshot for undo BEFORE the drag starts
+    ;(window as any).__editor?.pushUndo?.()
     e.currentTarget.setPointerCapture(e.pointerId)
     dragging.current = true
     lastX.current = e.clientX
@@ -298,17 +336,39 @@ const hintStyle: CSSProperties = {
   textAlign: 'center',
 }
 
-const resetBtnStyle: CSSProperties = {
+const btnGroupStyle: CSSProperties = {
+  display: 'flex',
+  gap: 6,
   marginTop: 12,
-  padding: '8px 12px',
+}
+
+const miniBtnStyle: CSSProperties = {
+  flex: 1,
+  padding: '7px 8px',
   background: 'transparent',
   color: '#fff',
   border: '1px solid rgba(255, 255, 255, 0.22)',
   borderRadius: 4,
   cursor: 'pointer',
-  fontSize: 12,
+  fontSize: 11,
   fontFamily: 'inherit',
   fontWeight: 500,
+}
+
+const knobWithReadoutStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: 4,
+}
+
+const readoutStyle: CSSProperties = {
+  fontSize: 10,
+  fontFamily: 'monospace',
+  letterSpacing: 0.3,
+  color: 'rgba(255, 255, 255, 0.6)',
+  minWidth: 36,
+  textAlign: 'center',
 }
 
 const knobStyle: CSSProperties = {

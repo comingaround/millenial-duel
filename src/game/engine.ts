@@ -20,6 +20,12 @@ import { ACTIVE_BONES, createEditorScene } from '../editor/editor-scene'
 import { createBonePicker } from '../editor/bone-picker'
 import { createEditorGizmo } from '../editor/gizmo'
 import { applyPose, snapshotPose } from '../editor/pose-store'
+import {
+  AnimationKeyframe,
+  playAnimation,
+  stopAnimation,
+} from '../editor/animation-player'
+import type { Animatable } from '@babylonjs/core'
 
 export type SceneHandle = {
   engine: Engine
@@ -237,11 +243,49 @@ export function createEngine(
       node.rotationQuaternion = node.rotationQuaternion.multiply(offset)
     }
 
+    let activeAnimatables: Animatable[] = []
+    const stopActiveAnimation = () => {
+      if (activeAnimatables.length) {
+        stopAnimation(activeAnimatables)
+        activeAnimatables = []
+      }
+    }
+
+    // --- Undo stack (last N bone-rotation snapshots) ---
+    const MAX_UNDO = 40
+    const undoStack: Array<Record<string, [number, number, number, number]>> = []
+    const pushUndo = () => {
+      const snap = snapshotPose(ed.skeleton, '__undo__')
+      undoStack.push(snap.rotations)
+      if (undoStack.length > MAX_UNDO) undoStack.shift()
+    }
+    const undo = () => {
+      stopActiveAnimation()
+      const prev = undoStack.pop()
+      if (!prev) return false
+      applyPose(ed.skeleton, { rotations: prev })
+      return true
+    }
+
+    // Read selected bone rotation as Euler angles (degrees) — for the UI readout
+    const getSelectedBoneEuler = () => {
+      if (!currentSelection) return null
+      const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
+      const node = bone?._linkedTransformNode
+      if (!node || !node.rotationQuaternion) return null
+      const e = node.rotationQuaternion.toEulerAngles()
+      const R2D = 180 / Math.PI
+      return { x: e.x * R2D, y: e.y * R2D, z: e.z * R2D }
+    }
+
     ;(window as any).__editor = {
       snapshot: (name: string) => snapshotPose(ed.skeleton, name),
-      apply: (pose: { rotations: Record<string, [number, number, number, number]> }) =>
-        applyPose(ed.skeleton, pose),
+      apply: (pose: { rotations: Record<string, [number, number, number, number]> }) => {
+        stopActiveAnimation()
+        applyPose(ed.skeleton, pose)
+      },
       reset: () => {
+        stopActiveAnimation()
         applyPose(ed.skeleton, { rotations: ed.restPose })
         selectBone(null)
       },
@@ -257,6 +301,21 @@ export function createEngine(
           if (i >= 0) boneSelectListeners.splice(i, 1)
         }
       },
+      playAnimation: (keyframes: AnimationKeyframe[]) => {
+        stopActiveAnimation()
+        activeAnimatables = playAnimation(scene, ed.skeleton, keyframes)
+      },
+      stopAnimation: () => stopActiveAnimation(),
+      pushUndo,
+      undo,
+      canUndo: () => undoStack.length > 0,
+      getSelectedBoneEuler,
+      getInitialAnchor: () => ({
+        id: '__initial__',
+        name: 'Initial position',
+        rotations: { ...ed.restPose },
+        system: true as const,
+      }),
     }
 
     if (cameraMode === 'editor') {
