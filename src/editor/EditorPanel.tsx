@@ -37,6 +37,7 @@ export default function EditorPanel() {
   const [animations, setAnimations] = useState<AnimDef[]>([])
   const [draft, setDraft] = useState<DraftAnim | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  const [editorReady, setEditorReady] = useState(false)
 
   // Load saved library from disk (dev plugin endpoint), then attach to editor
   useEffect(() => {
@@ -50,7 +51,10 @@ export default function EditorPanel() {
           const data = await res.json()
           if (cancelled) return
           if (Array.isArray(data.poses))      setPoses(data.poses)
-          if (Array.isArray(data.anchors))    setAnchors(data.anchors)
+          // Filter out any persisted system anchors (e.g. Initial) — we add
+          // them back at render time.
+          if (Array.isArray(data.anchors))
+            setAnchors(data.anchors.filter((a: Anchor) => !a.system))
           if (Array.isArray(data.animations)) setAnimations(data.animations)
         }
       } catch {
@@ -65,13 +69,7 @@ export default function EditorPanel() {
       if (!ed) return false
       unsub = ed.addBoneSelectListener((name) => setSelectedBone(name))
       setSelectedBone(ed.getSelectedBone())
-      // Auto-add Initial Position anchor (can't be deleted, not persisted)
-      const initial = ed.getInitialAnchor?.()
-      if (initial) {
-        setAnchors((curr) =>
-          curr.some((a) => a.id === initial.id) ? curr : [initial, ...curr],
-        )
-      }
+      setEditorReady(true)
       return true
     }
     if (!tryAttach()) {
@@ -89,6 +87,15 @@ export default function EditorPanel() {
       unsub?.()
     }
   }, [])
+
+  // Initial anchor is virtual — always available, never stored in state.
+  // Recomputed when editor becomes ready.
+  const initialAnchor: Anchor | null = editorReady
+    ? window.__editor?.getInitialAnchor?.() ?? null
+    : null
+  const displayedAnchors: Anchor[] = initialAnchor
+    ? [initialAnchor, ...anchors]
+    : anchors
 
   // Persist library to disk on every change (debounced 500ms). Skip during
   // initial hydration so we don't immediately overwrite the loaded data
@@ -161,8 +168,8 @@ export default function EditorPanel() {
   // --- Animation builder ---
 
   const onNewAnimation = () => {
-    if (anchors.length < 2) {
-      alert('Save at least 2 anchors before building an animation.')
+    if (displayedAnchors.length < 1) {
+      alert('No anchors available yet.')
       return
     }
     setDraft({
@@ -173,7 +180,7 @@ export default function EditorPanel() {
 
   const onAddKeyframe = () => {
     if (!draft) return
-    const first = anchors[0]
+    const first = displayedAnchors[0]
     if (!first) return
     const lastTime = draft.keyframes[draft.keyframes.length - 1]?.time ?? 0
     setDraft({
@@ -204,7 +211,7 @@ export default function EditorPanel() {
   const resolveKeyframes = (kfs: AnimKeyframe[]) =>
     kfs
       .map((kf) => {
-        const anchor = anchors.find((a) => a.id === kf.anchorId)
+        const anchor = displayedAnchors.find((a) => a.id === kf.anchorId)
         return anchor ? { anchor: { rotations: anchor.rotations }, time: kf.time } : null
       })
       .filter((x): x is { anchor: { rotations: RotationMap }; time: number } => x !== null)
@@ -279,11 +286,11 @@ export default function EditorPanel() {
       </Section>
 
       {/* Anchors */}
-      <Section label={`Anchors (${anchors.length})`}>
-        {anchors.length === 0 ? (
+      <Section label={`Anchors (${displayedAnchors.length})`}>
+        {displayedAnchors.length === 0 ? (
           <Empty text="(save anchors to build animations)" />
         ) : (
-          anchors.map((a) => (
+          displayedAnchors.map((a) => (
             <ListRow
               key={a.id}
               name={a.name}
@@ -316,7 +323,7 @@ export default function EditorPanel() {
                   onChange={(e) => onUpdateKeyframe(idx, { anchorId: e.target.value })}
                   style={selectStyle}
                 >
-                  {anchors.map((a) => (
+                  {displayedAnchors.map((a) => (
                     <option
                       key={a.id}
                       value={a.id}
