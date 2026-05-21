@@ -4,10 +4,12 @@ import {
   Quaternion,
   Scene,
   Skeleton,
+  Vector3,
 } from '@babylonjs/core'
 
 export type AnchorData = {
   rotations: Record<string, [number, number, number, number]>
+  positions?: Record<string, [number, number, number]>
 }
 
 export type AnimationKeyframe = {
@@ -50,9 +52,15 @@ export function playAnimation(
 
   // Collect every bone referenced anywhere in any keyframe
   const boneNames = new Set<string>()
+  const positionBoneNames = new Set<string>()
   for (const kf of cleaned) {
     for (const name of Object.keys(kf.anchor.rotations)) {
       boneNames.add(name)
+    }
+    if (kf.anchor.positions) {
+      for (const name of Object.keys(kf.anchor.positions)) {
+        positionBoneNames.add(name)
+      }
     }
   }
 
@@ -84,6 +92,38 @@ export function playAnimation(
       keys.push({
         frame: Math.round(kf.time * FPS),
         value: new Quaternion(r[0], r[1], r[2], r[3]),
+      })
+    }
+    if (keys.length < 2) continue
+    anim.setKeys(keys)
+    const ani = scene.beginDirectAnimation(node, [anim], 0, totalFrames, false, 1.0)
+    animatables.push(ani)
+  }
+
+  // Position tracks (Hips only in practice). Mirrors the rotation loop:
+  // implicit frame-0 keyframe = current node.position when no explicit start.
+  for (const boneName of positionBoneNames) {
+    const bone = skeleton.bones.find((b) => b.name === boneName)
+    const node = bone?._linkedTransformNode
+    if (!node) continue
+
+    const anim = new Animation(
+      `editor_pos_${boneName}`,
+      'position',
+      FPS,
+      Animation.ANIMATIONTYPE_VECTOR3,
+      Animation.ANIMATIONLOOPMODE_CONSTANT,
+    )
+    const keys: Array<{ frame: number; value: Vector3 }> = []
+    if (!hasStart) {
+      keys.push({ frame: 0, value: node.position.clone() })
+    }
+    for (const kf of cleaned) {
+      const p = kf.anchor.positions?.[boneName]
+      if (!p) continue
+      keys.push({
+        frame: Math.round(kf.time * FPS),
+        value: new Vector3(p[0], p[1], p[2]),
       })
     }
     if (keys.length < 2) continue

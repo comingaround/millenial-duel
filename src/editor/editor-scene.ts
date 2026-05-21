@@ -9,6 +9,7 @@ import {
   StandardMaterial,
   Vector3,
 } from '@babylonjs/core'
+import { POSITION_BONES } from './pose-store'
 
 // Standalone editor knight, isolated from the duel scene.
 const POSITION = new Vector3(50, 0, 0)
@@ -70,6 +71,7 @@ export type EditorSceneApi = {
   skeletons: Skeleton[]       // all 8 (need prepare() on each)
   allBoneNames: string[]      // full list for the panel
   restPose: Record<string, [number, number, number, number]>
+  restPositions: Record<string, [number, number, number]>
   position: Vector3
   animationGroups: any[]      // baked anims from the GLB
 }
@@ -130,8 +132,10 @@ export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> 
 
       const allBoneNames = skeleton.bones.map((b) => b.name)
 
-      // Capture rest pose
+      // Capture rest pose (rotations for every bone, plus local position
+      // for bones in POSITION_BONES — Hips only — so Reset can restore both).
       const restPose: Record<string, [number, number, number, number]> = {}
+      const restPositions: Record<string, [number, number, number]> = {}
       for (const bone of skeleton.bones) {
         const node = bone._linkedTransformNode
         if (!node) continue
@@ -139,6 +143,10 @@ export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> 
           node.rotationQuaternion ?? node.rotation.toQuaternion()
         const q = node.rotationQuaternion
         restPose[bone.name] = [q.x, q.y, q.z, q.w]
+        if (POSITION_BONES.includes(bone.name)) {
+          const p = node.position
+          restPositions[bone.name] = [p.x, p.y, p.z]
+        }
       }
 
       console.log(
@@ -150,6 +158,7 @@ export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> 
         skeletons,
         allBoneNames,
         restPose,
+        restPositions,
         position: POSITION.clone(),
         animationGroups: result.animationGroups,
       }

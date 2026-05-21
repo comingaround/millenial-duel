@@ -19,7 +19,7 @@ import { createHero } from './characters/hero'
 import { ACTIVE_BONES, createEditorScene } from '../editor/editor-scene'
 import { createBonePicker } from '../editor/bone-picker'
 import { createEditorGizmo } from '../editor/gizmo'
-import { applyPose, snapshotPose } from '../editor/pose-store'
+import { applyPose, snapshotPose, POSITION_BONES } from '../editor/pose-store'
 import {
   AnimationKeyframe,
   playAnimation,
@@ -267,6 +267,20 @@ export function createEngine(
       node.rotationQuaternion = node.rotationQuaternion.multiply(offset)
     }
 
+    // Translate the selected bone's local position. Currently only valid
+    // for bones in POSITION_BONES (Hips) — silently no-ops for others so
+    // limbs can't be stretched by accidental drags.
+    const translateSelectedBone = (axis: 'x' | 'y' | 'z', delta: number) => {
+      if (!currentSelection) return
+      if (!POSITION_BONES.includes(currentSelection)) return
+      const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
+      const node = bone?._linkedTransformNode
+      if (!node) return
+      if (axis === 'x') node.position.x += delta
+      else if (axis === 'y') node.position.y += delta
+      else node.position.z += delta
+    }
+
     let activeAnimatables: Animatable[] = []
     const stopActiveAnimation = () => {
       if (activeAnimatables.length) {
@@ -281,11 +295,16 @@ export function createEngine(
     // undo: snapshot current → redo, then pop undo and apply.
     // redo: snapshot current → undo, then pop redo and apply.
     const MAX_UNDO = 40
-    type Snap = Record<string, [number, number, number, number]>
+    type Snap = {
+      rotations: Record<string, [number, number, number, number]>
+      positions: Record<string, [number, number, number]>
+    }
     const undoStack: Snap[] = []
     const redoStack: Snap[] = []
-    const captureCurrent = (): Snap =>
-      snapshotPose(ed.skeleton, '__snap__').rotations
+    const captureCurrent = (): Snap => {
+      const s = snapshotPose(ed.skeleton, '__snap__')
+      return { rotations: s.rotations, positions: s.positions ?? {} }
+    }
     const pushUndo = () => {
       undoStack.push(captureCurrent())
       if (undoStack.length > MAX_UNDO) undoStack.shift()
@@ -297,7 +316,7 @@ export function createEngine(
       if (!prev) return false
       redoStack.push(captureCurrent())
       if (redoStack.length > MAX_UNDO) redoStack.shift()
-      applyPose(ed.skeleton, { rotations: prev })
+      applyPose(ed.skeleton, prev)
       return true
     }
     const redo = () => {
@@ -306,7 +325,7 @@ export function createEngine(
       if (!next) return false
       undoStack.push(captureCurrent())
       if (undoStack.length > MAX_UNDO) undoStack.shift()
-      applyPose(ed.skeleton, { rotations: next })
+      applyPose(ed.skeleton, next)
       return true
     }
 
@@ -321,19 +340,36 @@ export function createEngine(
       return { x: e.x * R2D, y: e.y * R2D, z: e.z * R2D }
     }
 
+    // Read selected bone's local position (only meaningful for POSITION_BONES).
+    const getSelectedBonePosition = () => {
+      if (!currentSelection) return null
+      if (!POSITION_BONES.includes(currentSelection)) return null
+      const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
+      const node = bone?._linkedTransformNode
+      if (!node) return null
+      return { x: node.position.x, y: node.position.y, z: node.position.z }
+    }
+
     ;(window as any).__editor = {
       snapshot: (name: string) => snapshotPose(ed.skeleton, name),
-      apply: (pose: { rotations: Record<string, [number, number, number, number]> }) => {
+      apply: (pose: {
+        rotations: Record<string, [number, number, number, number]>
+        positions?: Record<string, [number, number, number]>
+      }) => {
         stopActiveAnimation()
         applyPose(ed.skeleton, pose)
       },
       reset: () => {
         stopActiveAnimation()
-        applyPose(ed.skeleton, { rotations: ed.restPose })
+        applyPose(ed.skeleton, {
+          rotations: ed.restPose,
+          positions: ed.restPositions,
+        })
         selectBone(null)
       },
       selectBone,
       rotateSelectedBone,
+      translateSelectedBone,
       getSelectedBone: () => currentSelection,
       getActiveBones: () => ACTIVE_BONES.slice(),
       getAllBoneNames: () => ed.allBoneNames.slice(),
@@ -420,6 +456,8 @@ export function createEngine(
       canUndo: () => undoStack.length > 0,
       canRedo: () => redoStack.length > 0,
       getSelectedBoneEuler,
+      getSelectedBonePosition,
+      hasPositionControl: (boneName: string) => POSITION_BONES.includes(boneName),
       getInitialAnchor: () => ({
         id: '__initial__',
         name: 'Initial position',

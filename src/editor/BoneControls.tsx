@@ -1,13 +1,22 @@
 import { CSSProperties, useEffect, useRef, useState } from 'react'
 
 type Axis = 'x' | 'y' | 'z'
+
+// Rotation: drag-based sphere knob
 const SENSITIVITY = 0.008   // rad per pixel of horizontal drag
+
+// Translation: stepper UI
+const POS_STEP_M = 0.003             // 3 mm per click / wheel notch (~1/3 cm)
+// Multi-step burst: consecutive translation interactions inside this window
+// count as ONE undo entry — keeps the undo stack from filling on wheel scrolls.
+const UNDO_BURST_MS = 300
 
 export default function BoneControls() {
   const [selected, setSelected] = useState<string | null>(null)
   const [activeBones, setActiveBones] = useState<string[]>([])
   const [allBones, setAllBones] = useState<string[]>([])
   const [euler, setEuler] = useState<{ x: number; y: number; z: number } | null>(null)
+  const [pos, setPos] = useState<{ x: number; y: number; z: number } | null>(null)
 
   useEffect(() => {
     let unsub: (() => void) | null = null
@@ -32,17 +41,22 @@ export default function BoneControls() {
     return () => unsub?.()
   }, [])
 
-  // Poll the selected bone's Euler angles each frame for the readout.
+  // Poll the selected bone's Euler angles + position each frame for the readout.
   useEffect(() => {
     let rafId = 0
     const tick = () => {
-      const e = (window as any).__editor?.getSelectedBoneEuler?.()
-      setEuler(e ?? null)
+      const ed = (window as any).__editor
+      setEuler(ed?.getSelectedBoneEuler?.() ?? null)
+      setPos(ed?.getSelectedBonePosition?.() ?? null)
       rafId = requestAnimationFrame(tick)
     }
     rafId = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafId)
   }, [])
+
+  const hasPositionControl =
+    selected !== null &&
+    (window as any).__editor?.hasPositionControl?.(selected) === true
 
   const activeSet = new Set(activeBones)
   const enabled = selected !== null
@@ -96,6 +110,35 @@ export default function BoneControls() {
         <KnobWithReadout axis="z" label="Z" color="#3a82e6" value={euler?.z} disabled={!enabled} />
       </div>
       <div style={hintStyle}>drag ↔ horizontally</div>
+
+      {hasPositionControl && (
+        <>
+          <div style={{ ...titleStyle, marginTop: 16 }}>TRANSLATE</div>
+          <div style={subtitleStyle}>local position (m)</div>
+          <div style={stepperColStyle}>
+            <Stepper
+              axis="x" label="X" color="#c44b4b"
+              value={pos ? pos.x * 100 : undefined} unit="cm" precision={1} step={POS_STEP_M}
+              enabled
+              onStep={(d) => (window as any).__editor?.translateSelectedBone?.('x', d)}
+            />
+            <Stepper
+              axis="y" label="Y" color="#3d9c3a"
+              value={pos ? pos.y * 100 : undefined} unit="cm" precision={1} step={POS_STEP_M}
+              enabled
+              onStep={(d) => (window as any).__editor?.translateSelectedBone?.('y', d)}
+            />
+            <Stepper
+              axis="z" label="Z" color="#3270c7"
+              value={pos ? pos.z * 100 : undefined} unit="cm" precision={1} step={POS_STEP_M}
+              enabled
+              onStep={(d) => (window as any).__editor?.translateSelectedBone?.('z', d)}
+            />
+          </div>
+          <div style={hintStyle}>Y = crouch · X = side · Z = fwd/back</div>
+        </>
+      )}
+
       <div style={btnGroupStyle}>
         <button
           style={miniBtnStyle}
@@ -138,10 +181,7 @@ function KnobWithReadout({
 }
 
 function Knob({
-  axis,
-  label,
-  color,
-  disabled,
+  axis, label, color, disabled,
 }: {
   axis: Axis
   label: string
@@ -154,28 +194,24 @@ function Knob({
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (disabled) return
-    // Snapshot for undo BEFORE the drag starts
     ;(window as any).__editor?.pushUndo?.()
     e.currentTarget.setPointerCapture(e.pointerId)
     dragging.current = true
     lastX.current = e.clientX
     setActive(true)
   }
-
   const onPointerMove = (e: React.PointerEvent) => {
     if (!dragging.current) return
     const dx = e.clientX - lastX.current
     lastX.current = e.clientX
     ;(window as any).__editor?.rotateSelectedBone?.(axis, dx * SENSITIVITY)
   }
-
   const stop = (e: React.PointerEvent) => {
     if (!dragging.current) return
     dragging.current = false
     try { e.currentTarget.releasePointerCapture(e.pointerId) } catch {}
     setActive(false)
   }
-
   return (
     <div
       onPointerDown={onPointerDown}
@@ -192,6 +228,97 @@ function Knob({
       }}
     >
       <span style={knobLabelStyle}>{label}</span>
+    </div>
+  )
+}
+
+function lighten(hex: string) {
+  const n = parseInt(hex.replace('#', ''), 16)
+  const r = Math.min(255, ((n >> 16) & 0xff) + 70)
+  const g = Math.min(255, ((n >> 8) & 0xff) + 70)
+  const b = Math.min(255, (n & 0xff) + 70)
+  return `rgb(${r},${g},${b})`
+}
+function darken(hex: string) {
+  const n = parseInt(hex.replace('#', ''), 16)
+  const r = Math.max(0, ((n >> 16) & 0xff) - 70)
+  const g = Math.max(0, ((n >> 8) & 0xff) - 70)
+  const b = Math.max(0, (n & 0xff) - 70)
+  return `rgb(${r},${g},${b})`
+}
+
+function Stepper({
+  label, color, value, unit, precision, step, enabled, onStep,
+}: {
+  axis: Axis
+  label: string
+  color: string
+  value: number | undefined
+  unit: string
+  precision: number
+  step: number
+  enabled: boolean
+  onStep: (delta: number) => void
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const lastStepTime = useRef(0)
+
+  const beginActionMaybe = () => {
+    // Push undo only when starting a new "burst" (no step in last UNDO_BURST_MS).
+    // Lets a long wheel scroll or a rapid click streak collapse into one undo.
+    const now = Date.now()
+    if (now - lastStepTime.current > UNDO_BURST_MS) {
+      ;(window as any).__editor?.pushUndo?.()
+    }
+    lastStepTime.current = now
+  }
+
+  const doStep = (sign: 1 | -1) => {
+    if (!enabled) return
+    beginActionMaybe()
+    onStep(sign * step)
+  }
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (!enabled) return
+      // preventDefault requires non-passive listener (React's onWheel is
+      // passive by default in modern React/browsers).
+      e.preventDefault()
+      doStep(e.deltaY < 0 ? 1 : -1)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [enabled])
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        ...stepperRowStyle,
+        opacity: enabled ? 1 : 0.35,
+        borderLeft: `3px solid ${color}`,
+      }}
+      title={enabled ? 'Click ± · scroll to step' : 'Select a bone first'}
+    >
+      <span style={{ ...stepperAxisStyle, color }}>{label}</span>
+      <button
+        type="button"
+        disabled={!enabled}
+        onClick={() => doStep(-1)}
+        style={{ ...stepperBtnStyle, cursor: enabled ? 'pointer' : 'not-allowed' }}
+      >−</button>
+      <span style={stepperValueStyle}>
+        {value !== undefined ? `${value.toFixed(precision)}${unit}` : '—'}
+      </span>
+      <button
+        type="button"
+        disabled={!enabled}
+        onClick={() => doStep(1)}
+        style={{ ...stepperBtnStyle, cursor: enabled ? 'pointer' : 'not-allowed' }}
+      >+</button>
     </div>
   )
 }
@@ -227,21 +354,6 @@ function categorize(allBones: string[]): Array<{ name: string; bones: string[] }
   return Object.entries(groups)
     .filter(([, list]) => list.length > 0)
     .map(([name, bones]) => ({ name, bones }))
-}
-
-function lighten(hex: string) {
-  const n = parseInt(hex.replace('#', ''), 16)
-  const r = Math.min(255, ((n >> 16) & 0xff) + 70)
-  const g = Math.min(255, ((n >> 8) & 0xff) + 70)
-  const b = Math.min(255, (n & 0xff) + 70)
-  return `rgb(${r},${g},${b})`
-}
-function darken(hex: string) {
-  const n = parseInt(hex.replace('#', ''), 16)
-  const r = Math.max(0, ((n >> 16) & 0xff) - 70)
-  const g = Math.max(0, ((n >> 8) & 0xff) - 70)
-  const b = Math.max(0, (n & 0xff) - 70)
-  return `rgb(${r},${g},${b})`
 }
 
 const panelStyle: CSSProperties = {
@@ -340,6 +452,95 @@ const knobRowStyle: CSSProperties = {
   marginBottom: 10,
 }
 
+const knobWithReadoutStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: 4,
+}
+
+const readoutStyle: CSSProperties = {
+  fontSize: 10,
+  fontFamily: 'monospace',
+  letterSpacing: 0.3,
+  color: 'rgba(255, 255, 255, 0.6)',
+  minWidth: 36,
+  textAlign: 'center',
+}
+
+const knobStyle: CSSProperties = {
+  width: 90,
+  height: 90,
+  borderRadius: '50%',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  boxShadow: 'inset -4px -6px 9px rgba(0,0,0,0.4)',
+  touchAction: 'none',
+  flexShrink: 0,
+  transition: 'outline-color 120ms',
+}
+
+const knobLabelStyle: CSSProperties = {
+  fontSize: 30,
+  fontWeight: 700,
+  color: '#fff',
+  textShadow: '0 1px 2px rgba(0,0,0,0.5)',
+  pointerEvents: 'none',
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
+}
+
+const stepperColStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 5,
+  marginTop: 8,
+  marginBottom: 8,
+}
+
+const stepperRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '5px 8px',
+  background: 'rgba(255, 255, 255, 0.05)',
+  borderRadius: 4,
+  fontSize: 12,
+  touchAction: 'none',
+}
+
+const stepperAxisStyle: CSSProperties = {
+  fontWeight: 700,
+  fontSize: 11,
+  width: 12,
+  textAlign: 'center',
+}
+
+const stepperBtnStyle: CSSProperties = {
+  width: 24,
+  height: 22,
+  background: 'rgba(255, 255, 255, 0.08)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 3,
+  fontFamily: 'inherit',
+  fontSize: 14,
+  fontWeight: 600,
+  lineHeight: '20px',
+  padding: 0,
+  userSelect: 'none',
+}
+
+const stepperValueStyle: CSSProperties = {
+  flex: 1,
+  fontFamily: 'monospace',
+  fontSize: 12,
+  letterSpacing: 0.3,
+  textAlign: 'center',
+  color: 'rgba(255, 255, 255, 0.92)',
+}
+
 const hintStyle: CSSProperties = {
   fontSize: 10,
   opacity: 0.45,
@@ -378,44 +579,5 @@ const resetBtnStyle: CSSProperties = {
   fontFamily: 'inherit',
   fontWeight: 600,
   letterSpacing: 0.3,
-}
-
-const knobWithReadoutStyle: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  alignItems: 'center',
-  gap: 4,
-}
-
-const readoutStyle: CSSProperties = {
-  fontSize: 10,
-  fontFamily: 'monospace',
-  letterSpacing: 0.3,
-  color: 'rgba(255, 255, 255, 0.6)',
-  minWidth: 36,
-  textAlign: 'center',
-}
-
-const knobStyle: CSSProperties = {
-  width: 90,
-  height: 90,
-  borderRadius: '50%',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  boxShadow: 'inset -4px -6px 9px rgba(0,0,0,0.4)',
-  touchAction: 'none',
-  flexShrink: 0,
-  transition: 'outline-color 120ms',
-}
-
-const knobLabelStyle: CSSProperties = {
-  fontSize: 30,
-  fontWeight: 700,
-  color: '#fff',
-  textShadow: '0 1px 2px rgba(0,0,0,0.5)',
-  pointerEvents: 'none',
-  userSelect: 'none',
-  WebkitUserSelect: 'none',
 }
 

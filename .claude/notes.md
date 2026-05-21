@@ -6,9 +6,10 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 
 - ✅ Duel scene (hero + opponent + 2 baked-key animations) — same as before
 - ✅ Custom **pose/animation editor** at scene `(50, 0, 0)` — separate knight rig used purely as a posing puppet
-- ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, Initial Position anchor (auto, undeletable), rename via ✎ icon, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
-- ✅ Persistence: `public/custom-animations/library.json` via dev-only Vite middleware (`vite-plugins/animation-saver.ts`)
-- ✅ Key dispatch: engine.ts checks `window.__customAnims` first → falls back to default Q/U/Space/Enter
+- ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips position stepper (X/Y/Z, ±/scroll-wheel, 3mm step, displayed in cm)**, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, Initial Position anchor (auto, undeletable), rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
+- ✅ **Undo + Redo** with keyboard shortcuts (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z). UI: undo+redo in one row, full-width red Reset button below.
+- ✅ Persistence: `public/custom-animations/library.json` via dev-only Vite middleware (`vite-plugins/animation-saver.ts`). Anchors carry both `rotations` and (Hips-only) `positions` — round-trips through the JSON automatically.
+- ✅ Key dispatch: engine.ts checks `window.__customAnims` first → falls back to default Q/U/Space/Enter. Ctrl+Z/Y guarded before custom-anim lookup so a user-bound 'z'/'y' doesn't swallow them.
 - ⏳ No HP / damage / AI / HUD yet
 
 ## Stack
@@ -228,10 +229,27 @@ scene.onBeforeRenderObservable.add(() => {
 ### Bone rotation UI (`BoneControls.tsx`)
 
 - Bone tree on top, categorized by Torso / Left Arm / Right Arm / Left Leg / Right Leg / IK Helpers via `categorize()` function
-- Bottom: 3 vertical 90×90 sphere knobs (X red, Y green, Z blue) — drag vertically to rotate, sensitivity 0.008 rad/pixel
-- Each knob shows current Euler degree readout
-- `userSelect: 'none'` on panel + labels so dragging knobs doesn't select text
-- Undo + Reset buttons
+- Middle (ROTATE): 3 vertical 90×90 sphere knobs (X red, Y green, Z blue) — drag horizontally to rotate, sensitivity 0.008 rad/pixel. Each knob shows current Euler degree readout. `userSelect: 'none'` on panel + labels so dragging knobs doesn't select text. Selecting any bone enables them.
+- Bottom (TRANSLATE) — **only visible when Hips is selected** (gated by `__editor.hasPositionControl(name)`): 3 stacked `Stepper` rows for X/Y/Z. Layout: `[label] [−] [value cm] [+]` with a colored left bar per axis. Click ± steps by `POS_STEP_M = 0.003` (3 mm). **Scroll-wheel on hover** also steps (deltaY < 0 → +, > 0 → −) via a non-passive `wheel` listener (React's onWheel is passive by default — can't preventDefault). Value shown in cm with 1 decimal (e.g. `95.3 cm`) for clean 0.3 increments. Hint: `Y = crouch · X = side · Z = fwd/back`.
+- **Undo coalescing on Stepper**: rapid clicks or wheel notches within `UNDO_BURST_MS = 300` collapse into ONE undo entry. Implementation: `lastStepTime` ref + `beginActionMaybe()` checks elapsed time before calling `pushUndo`. Avoids filling the 40-slot undo stack on a single scroll gesture.
+- Below all controls: Undo + Redo side-by-side; Reset (full-width, red-tinted) below.
+
+### Hips translation (crouch / lean / weight shift)
+
+The editor lets a small allow-list of bones carry **local position** alongside rotation. Currently just Hips. Lowering Hips Y crouches the whole body without sliding the character through the world (feet stay planted via the leg chain).
+
+- `POSITION_BONES = ['Hips']` lives in `src/editor/pose-store.ts` and is the single source of truth.
+- `snapshotPose` / `applyPose` now both capture/restore an optional `positions: Record<string, [x,y,z]>` alongside `rotations`.
+- `editor-scene.ts` extends `EditorSceneApi` with `restPositions` so Reset restores the standing height.
+- `engine.ts` exposes:
+  - `translateSelectedBone(axis, deltaMeters)` — no-ops on non-`POSITION_BONES` bones so limbs can't be stretched by an accidental drag.
+  - `getSelectedBonePosition()` — local position of selected bone in meters (or `null` if no position control).
+  - `hasPositionControl(boneName)` — for the UI to decide whether to render TRANSLATE.
+- Undo/redo `Snap` type now `{ rotations, positions }`; capture+restore go through `snapshotPose`/`applyPose`.
+- `animation-player.ts` builds a second Babylon track per position-carrying bone: `position`, `ANIMATIONTYPE_VECTOR3`, same FPS, same implicit-frame-0 = current state rule. Plays in sync with the quaternion tracks.
+- Persistence: anchors saved/loaded with `positions` blob automatically. The `Anchor` / `Pose` types in `EditorPanel.tsx` carry it as optional.
+
+**Why scope to just Hips:** lets the schema permit other bones later (head bobble, hand offset etc.) without rewriting everything, while preventing the user from accidentally stretching forearms by dragging a non-Hips bone's position. A bone-by-bone allow-list is the conservative gate.
 
 ### Animation builder + player
 
@@ -312,8 +330,8 @@ The Initial Position anchor used to be stored in state and inserted by both an a
 - `window.__bjs` = `{engine, scene, camera, fpCam, editorCam, setCameraMode}`
 - `window.__hero` = `{playStrike, playBlock, getHeadNode, playCustomAnimation}`
 - `window.__opponent` = `{playSlash, playBlock, playCustomAnimation}`
-- `window.__editor` = `{playAnimation, pushUndo, undo, reset, getSelectedBoneEuler, getInitialAnchor, listBakedAnimations, importBakedAnimation, ...}`
-- `window.__customAnims` = resolved custom animations with key bindings
+- `window.__editor` = `{snapshot, apply, reset, selectBone, getSelectedBone, addBoneSelectListener, rotateSelectedBone, translateSelectedBone, getSelectedBoneEuler, getSelectedBonePosition, hasPositionControl, playAnimation, stopAnimation, pushUndo, undo, redo, canUndo, canRedo, getInitialAnchor, listBakedAnimations, importBakedAnimation, ...}`
+- `window.__customAnims` = resolved custom animations `{name, heroKey, oppKey, resolved: [{anchor:{rotations, positions?}, time}]}` — `positions` flows through for Hips translation playback
 
 ## Asset pipeline (FBX → GLB)
 
@@ -386,7 +404,7 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - Q/Space (hero) and U/Enter (opponent) → strike + block animations
 - Combat_idle looping on both, pauses cleanly when other animations play
 - Arrow-key camera movement (no page scroll)
-- **In-browser pose/animation editor** with bone-pick, knob rotation, anchors, animation builder, library persistence, import-baked, per-character key bindings
+- **In-browser pose/animation editor** with bone-pick, knob rotation, Hips position stepper (X/Y/Z, scroll-wheel, 3mm step, cm readout), anchors, animation builder w/ in-place Edit, undo+redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, with burst-coalescing for stepper), library persistence (rotations + positions), import-baked, per-character key bindings
 
 ⏳ **Pending:**
 - HP system + damage timing
@@ -409,6 +427,11 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 6. **Virtual list entries beat stateful "system" entries.** Initial Position anchor lives in render-time computed `displayedAnchors`, not React state. Eliminated a race condition between fetch hydrate + editor-ready probe.
 7. **Dev-only Vite middleware is the cheap way to read/write JSON from the browser** during local dev. `configureServer` + `app.use` + check `req.url`. Won't survive prod build — fine for an author-time tool.
 8. **3-frame imports of complex baked animations look broken.** Not a bug — slerp limitation. 5+ is the user's working minimum for sword_atk01.
+9. **Bone-translation scope must be an allow-list, not a free-for-all.** `POSITION_BONES = ['Hips']` gates `translateSelectedBone` so dragging a Lower Arm bone can't stretch the forearm. Leaving the schema able to carry positions for other bones costs nothing — UI just won't render the controls until a bone is allow-listed.
+10. **Wheel-scroll events on React `onWheel` are passive by default** in modern browsers — `preventDefault` is a no-op. To get a stepper that consumes the wheel without scrolling the page, attach via `addEventListener('wheel', fn, { passive: false })` in a useEffect.
+11. **Burst-coalescing prevents undo-stack DoS.** A 30-notch wheel scroll = ONE undo entry, not 30. Implementation: only `pushUndo` when the previous step was >300ms ago (`UNDO_BURST_MS`). Same trick would apply to keyboard-held auto-repeat.
+12. **Edit-in-place via the same draft form, not a separate "edit" mode.** When user clicks ✎ on an animation, load name + keyframes into the existing builder UI with an `editingId` flag. Save commits in place (no duplicate), Cancel discards. One UI surface, two modes. Header text flips `New Animation` ↔ `Edit Animation`.
+13. **Display units ≠ underlying units.** Hips translation stepper stores meters internally (so Babylon math is consistent) but displays centimeters (so the readout is human-scale). The step size and display formatting are independent knobs — `step={0.003}` (m) + `value={pos.y * 100}` + `unit="cm"` + `precision={1}` gave a clean 0.3-cm-per-click feel without changing any engine code.
 
 ## What we tried and rejected
 

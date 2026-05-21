@@ -1,9 +1,12 @@
 import { CSSProperties, useEffect, useState } from 'react'
 
 type RotationMap = Record<string, [number, number, number, number]>
+type PositionMap = Record<string, [number, number, number]>
 
-type Pose = { id: string; name: string; rotations: RotationMap }
-type Anchor = { id: string; name: string; rotations: RotationMap; system?: boolean }
+type Pose = { id: string; name: string; rotations: RotationMap; positions?: PositionMap }
+type Anchor = {
+  id: string; name: string; rotations: RotationMap; positions?: PositionMap; system?: boolean
+}
 
 type AnimKeyframe = { anchorId: string; time: number }
 type AnimDef = {
@@ -18,12 +21,14 @@ type DraftAnim = { name: string; keyframes: AnimKeyframe[]; editingId?: string }
 
 type EditorApi = {
   snapshot: (name: string) => Pose
-  apply: (pose: { rotations: RotationMap }) => void
+  apply: (pose: { rotations: RotationMap; positions?: PositionMap }) => void
   reset: () => void
   selectBone: (name: string | null) => void
   getSelectedBone: () => string | null
   addBoneSelectListener: (cb: (name: string | null) => void) => () => void
-  playAnimation: (keyframes: Array<{ anchor: { rotations: RotationMap }; time: number }>) => void
+  playAnimation: (
+    keyframes: Array<{ anchor: { rotations: RotationMap; positions?: PositionMap }; time: number }>,
+  ) => void
   stopAnimation: () => void
   pushUndo: () => void
   undo: () => boolean
@@ -33,7 +38,10 @@ type EditorApi = {
   importBakedAnimation?: (
     animName: string,
     sampleCount?: number,
-  ) => { anchors: Array<{ name: string; rotations: RotationMap }>; durations: number[] } | null
+  ) => {
+    anchors: Array<{ name: string; rotations: RotationMap; positions?: PositionMap }>
+    durations: number[]
+  } | null
 }
 
 declare global {
@@ -142,9 +150,14 @@ export default function EditorPanel() {
       resolved: a.keyframes
         .map((kf) => {
           const an = displayedAnchors.find((x) => x.id === kf.anchorId)
-          return an ? { anchor: { rotations: an.rotations }, time: kf.time } : null
+          return an
+            ? { anchor: { rotations: an.rotations, positions: an.positions }, time: kf.time }
+            : null
         })
-        .filter((x): x is { anchor: { rotations: RotationMap }; time: number } => x !== null),
+        .filter((x) => x !== null) as Array<{
+          anchor: { rotations: RotationMap; positions?: PositionMap }
+          time: number
+        }>,
     }))
     ;(window as any).__customAnims = resolved
   }, [animations, anchors, editorReady])
@@ -176,6 +189,7 @@ export default function EditorPanel() {
         ? crypto.randomUUID() : `anch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       name: a.name,
       rotations: a.rotations,
+      positions: a.positions,
     }))
     setAnchors((curr) => [...curr, ...newAnchors])
 
@@ -297,9 +311,11 @@ export default function EditorPanel() {
     kfs
       .map((kf) => {
         const anchor = displayedAnchors.find((a) => a.id === kf.anchorId)
-        return anchor ? { anchor: { rotations: anchor.rotations }, time: kf.time } : null
+        return anchor
+          ? { anchor: { rotations: anchor.rotations, positions: anchor.positions }, time: kf.time }
+          : null
       })
-      .filter((x): x is { anchor: { rotations: RotationMap }; time: number } => x !== null)
+      .filter((x): x is NonNullable<typeof x> => x !== null)
 
   const onPreviewDraft = () => {
     if (!draft) return
