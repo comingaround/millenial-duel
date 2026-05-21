@@ -350,6 +350,15 @@ export function createEngine(
       return { x: node.position.x, y: node.position.y, z: node.position.z }
     }
 
+    // Capture original editor material colors NOW, before any user edits.
+    // This is the baseline for the Style panel's Reset button.
+    const editorMaterialBaseline = new Map<string, string>()
+    for (const m of scene.materials as any[]) {
+      if (typeof m.name === 'string' && m.name.startsWith('editor_')) {
+        editorMaterialBaseline.set(m.name, m.diffuseColor?.toHexString?.() ?? '#888888')
+      }
+    }
+
     ;(window as any).__editor = {
       snapshot: (name: string) => snapshotPose(ed.skeleton, name),
       apply: (pose: {
@@ -458,6 +467,40 @@ export function createEngine(
       getSelectedBoneEuler,
       getSelectedBonePosition,
       hasPositionControl: (boneName: string) => POSITION_BONES.includes(boneName),
+      // Right-panel can flip the bone-picker spheres off when switching to
+      // Style mode so the armor is visually clear.
+      setBonePickerActive: (active: boolean) => {
+        bonePicker?.setActive(active)
+      },
+      // Editor-knight materials — list + recolor for the Style panel. Materials
+      // were created as `editor_${matName}` in editor-scene.ts.
+      getEditorMaterials: () => {
+        return scene.materials
+          .filter((m: any) => typeof m.name === 'string' && m.name.startsWith('editor_'))
+          .map((m: any) => ({
+            name: m.name.replace(/^editor_/, ''),
+            hex: m.diffuseColor?.toHexString?.() ?? '#888888',
+          }))
+      },
+      setEditorMaterialColor: (matName: string, hex: string) => {
+        const full = `editor_${matName}`
+        const mat = scene.materials.find((m: any) => m.name === full) as any
+        if (!mat) return
+        const c = Color3.FromHexString(hex)
+        mat.diffuseColor = c
+        mat.ambientColor = c.scale(0.5)
+      },
+      // Restore every editor_* material to its scene-load color.
+      resetEditorMaterials: () => {
+        for (const m of scene.materials as any[]) {
+          if (typeof m.name !== 'string' || !m.name.startsWith('editor_')) continue
+          const hex = editorMaterialBaseline.get(m.name)
+          if (!hex) continue
+          const c = Color3.FromHexString(hex)
+          m.diffuseColor = c
+          m.ambientColor = c.scale(0.5)
+        }
+      },
       getInitialAnchor: () => ({
         id: '__initial__',
         name: 'Initial position',

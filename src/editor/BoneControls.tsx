@@ -11,12 +11,17 @@ const POS_STEP_M = 0.003             // 3 mm per click / wheel notch (~1/3 cm)
 // count as ONE undo entry — keeps the undo stack from filling on wheel scrolls.
 const UNDO_BURST_MS = 300
 
+type PanelMode = 'bones' | 'style'
+type EditorMaterial = { name: string; hex: string }
+
 export default function BoneControls() {
+  const [panelMode, setPanelMode] = useState<PanelMode>('bones')
   const [selected, setSelected] = useState<string | null>(null)
   const [activeBones, setActiveBones] = useState<string[]>([])
   const [allBones, setAllBones] = useState<string[]>([])
   const [euler, setEuler] = useState<{ x: number; y: number; z: number } | null>(null)
   const [pos, setPos] = useState<{ x: number; y: number; z: number } | null>(null)
+  const [materials, setMaterials] = useState<EditorMaterial[]>([])
 
   useEffect(() => {
     let unsub: (() => void) | null = null
@@ -54,6 +59,37 @@ export default function BoneControls() {
     return () => cancelAnimationFrame(rafId)
   }, [])
 
+  // When switching modes: hide bone spheres in Style mode (so armor is visually
+  // clear), and refresh the material list. Restore bone spheres when leaving.
+  useEffect(() => {
+    const ed = (window as any).__editor
+    if (!ed) return
+    if (panelMode === 'style') {
+      ed.setBonePickerActive?.(false)
+      ed.selectBone?.(null)
+      const mats: EditorMaterial[] = ed.getEditorMaterials?.() ?? []
+      // Stable display order: alphabetical by name.
+      mats.sort((a, b) => a.name.localeCompare(b.name))
+      setMaterials(mats)
+    } else {
+      ed.setBonePickerActive?.(true)
+    }
+  }, [panelMode])
+
+  const onMaterialColor = (matName: string, hex: string) => {
+    ;(window as any).__editor?.setEditorMaterialColor?.(matName, hex)
+    setMaterials((curr) => curr.map((m) => (m.name === matName ? { ...m, hex } : m)))
+  }
+
+  const onResetMaterials = () => {
+    const ed = (window as any).__editor
+    ed?.resetEditorMaterials?.()
+    // Re-read so the swatches sync to the restored colors.
+    const mats: EditorMaterial[] = ed?.getEditorMaterials?.() ?? []
+    mats.sort((a, b) => a.name.localeCompare(b.name))
+    setMaterials(mats)
+  }
+
   const hasPositionControl =
     selected !== null &&
     (window as any).__editor?.hasPositionControl?.(selected) === true
@@ -68,6 +104,46 @@ export default function BoneControls() {
 
   return (
     <div style={panelStyle}>
+      {/* Top tabs: Bones / Style */}
+      <div style={tabsStyle}>
+        <button
+          style={{ ...tabStyle, ...(panelMode === 'bones' ? tabActiveStyle : {}) }}
+          onClick={() => setPanelMode('bones')}
+        >
+          Bones
+        </button>
+        <button
+          style={{ ...tabStyle, ...(panelMode === 'style' ? tabActiveStyle : {}) }}
+          onClick={() => setPanelMode('style')}
+        >
+          Style
+        </button>
+      </div>
+
+      {panelMode === 'style' ? (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div style={titleStyle}>MATERIALS</div>
+          <div style={subtitleStyle}>{materials.length} slots — click swatch to recolor</div>
+          <div style={materialListStyle}>
+            {materials.map((m) => (
+              <label key={m.name} style={materialRowStyle}>
+                <input
+                  type="color"
+                  value={m.hex}
+                  onChange={(e) => onMaterialColor(m.name, e.target.value)}
+                  style={swatchStyle}
+                />
+                <span style={materialNameStyle}>{m.name}</span>
+                <span style={materialHexStyle}>{m.hex.toUpperCase()}</span>
+              </label>
+            ))}
+          </div>
+          <button style={resetBtnStyle} onClick={onResetMaterials}>
+            Reset to default colors
+          </button>
+        </div>
+      ) : (
+      <>
       <div style={titleStyle}>BONES</div>
       <div style={subtitleStyle}>
         {activeBones.length} active / {allBones.length} total
@@ -161,6 +237,8 @@ export default function BoneControls() {
       >
         Reset to rest pose
       </button>
+      </>
+      )}
     </div>
   )
 }
@@ -441,6 +519,79 @@ const dividerStyle: CSSProperties = {
   height: 1,
   background: 'rgba(255,255,255,0.08)',
   margin: '14px 0 12px 0',
+}
+
+const tabsStyle: CSSProperties = {
+  display: 'flex',
+  gap: 4,
+  marginBottom: 12,
+  background: 'rgba(0, 0, 0, 0.25)',
+  padding: 3,
+  borderRadius: 6,
+}
+
+const tabStyle: CSSProperties = {
+  flex: 1,
+  padding: '6px 10px',
+  background: 'transparent',
+  color: 'rgba(255, 255, 255, 0.55)',
+  border: 'none',
+  borderRadius: 4,
+  cursor: 'pointer',
+  fontSize: 11.5,
+  letterSpacing: 0.5,
+  fontFamily: 'inherit',
+  fontWeight: 600,
+  textTransform: 'uppercase',
+}
+
+const tabActiveStyle: CSSProperties = {
+  background: 'rgba(255, 255, 255, 0.1)',
+  color: '#fff',
+}
+
+const materialListStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 4,
+  marginTop: 8,
+  overflowY: 'auto',
+  flex: 1,
+  minHeight: 0,
+}
+
+const materialRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '4px 8px',
+  background: 'rgba(255, 255, 255, 0.05)',
+  borderRadius: 4,
+  cursor: 'pointer',
+}
+
+const swatchStyle: CSSProperties = {
+  width: 28,
+  height: 22,
+  padding: 0,
+  border: '1px solid rgba(255, 255, 255, 0.25)',
+  borderRadius: 3,
+  background: 'transparent',
+  cursor: 'pointer',
+  flexShrink: 0,
+}
+
+const materialNameStyle: CSSProperties = {
+  flex: 1,
+  fontSize: 12,
+  color: 'rgba(255, 255, 255, 0.9)',
+}
+
+const materialHexStyle: CSSProperties = {
+  fontFamily: 'monospace',
+  fontSize: 10,
+  color: 'rgba(255, 255, 255, 0.45)',
+  letterSpacing: 0.3,
 }
 
 const knobRowStyle: CSSProperties = {
