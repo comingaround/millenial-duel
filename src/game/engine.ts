@@ -3,6 +3,7 @@ import {
   Color3,
   Color4,
   Engine,
+  Quaternion,
   Scene,
   UniversalCamera,
   Vector3,
@@ -15,6 +16,10 @@ import { createTrees } from './scene/trees'
 import { createBuildings } from './scene/buildings'
 import { createOpponent } from './characters/opponent'
 import { createHero } from './characters/hero'
+import { ACTIVE_BONES, createEditorScene } from '../editor/editor-scene'
+import { createBonePicker } from '../editor/bone-picker'
+import { createEditorGizmo } from '../editor/gizmo'
+import { applyPose, snapshotPose } from '../editor/pose-store'
 
 export type SceneHandle = {
   engine: Engine
@@ -93,20 +98,46 @@ export function createEngine(
   // Disable WASD on the FPS camera (don't want keyboard to move it)
   fpCam.inputs.removeByType('FreeCameraKeyboardMoveInput')
 
-  // Mode switch — keep arc cam active by default
-  let cameraMode: 'free' | 'locked' = 'free'
+  // --- Third camera: Editor. Orbits the standalone editor knight. ---
+  const editorCam = new ArcRotateCamera(
+    'editor_cam',
+    Math.PI / 2,             // facing knight from his front (knight defaults facing -Z)
+    Math.PI / 2.4,
+    4,
+    new Vector3(50, 1.0, 0),
+    scene,
+  )
+  editorCam.fov = 0.9
+  editorCam.minZ = 0.05
+  editorCam.maxZ = 2000
+  editorCam.lowerRadiusLimit = 1.5
+  editorCam.upperRadiusLimit = 20
+  editorCam.wheelDeltaPercentage = 0.05
+  editorCam.panningSensibility = 100
+
+  let cameraMode: 'free' | 'locked' | 'editor' = 'free'
   scene.activeCamera = camera
 
-  const setCameraMode = (mode: 'free' | 'locked') => {
+  // Will be populated when editor scene finishes loading
+  let bonePicker: ReturnType<typeof createBonePicker> | null = null
+  let editorGizmo: ReturnType<typeof createEditorGizmo> | null = null
+
+  const setCameraMode = (mode: 'free' | 'locked' | 'editor') => {
     cameraMode = mode
+    camera.detachControl()
+    fpCam.detachControl()
+    editorCam.detachControl()
+    bonePicker?.setActive(false)
     if (mode === 'free') {
       scene.activeCamera = camera
       camera.attachControl(canvas, false)
-      fpCam.detachControl()
-    } else {
+    } else if (mode === 'locked') {
       scene.activeCamera = fpCam
       fpCam.attachControl(canvas, false)
-      camera.detachControl()
+    } else {
+      scene.activeCamera = editorCam
+      editorCam.attachControl(canvas, false)
+      bonePicker?.setActive(true)
     }
   }
 
@@ -170,6 +201,68 @@ export function createEngine(
   createBuildings(scene)
   createOpponent(scene)
   createHero(scene)
+
+  // --- Editor: load standalone knight + wire bone picker + custom rotation API ---
+  createEditorScene(scene).then((ed) => {
+    if (!ed) return
+    bonePicker = createBonePicker(scene, ed.skeleton, ACTIVE_BONES)
+    editorGizmo = createEditorGizmo(scene, ed.skeleton)
+    // Babylon's gizmo rings disabled — we use our own 3-sphere UI on the right.
+    editorGizmo.setActive(false)
+
+    let currentSelection: string | null = null
+    const boneSelectListeners: Array<(name: string | null) => void> = []
+
+    const selectBone = (name: string | null) => {
+      currentSelection = name
+      bonePicker!.setSelected(name)
+      boneSelectListeners.forEach((cb) => cb(name))
+    }
+
+    bonePicker.onSelect((boneName) => selectBone(boneName))
+
+    const rotateSelectedBone = (axis: 'x' | 'y' | 'z', deltaRad: number) => {
+      if (!currentSelection) return
+      const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
+      const node = bone?._linkedTransformNode
+      if (!node) return
+      node.rotationQuaternion =
+        node.rotationQuaternion ?? node.rotation.toQuaternion()
+      const ax =
+        axis === 'x' ? new Vector3(1, 0, 0)
+        : axis === 'y' ? new Vector3(0, 1, 0)
+        : new Vector3(0, 0, 1)
+      const offset = Quaternion.RotationAxis(ax, deltaRad)
+      // Post-multiply: rotation is in the bone's LOCAL frame
+      node.rotationQuaternion = node.rotationQuaternion.multiply(offset)
+    }
+
+    ;(window as any).__editor = {
+      snapshot: (name: string) => snapshotPose(ed.skeleton, name),
+      apply: (pose: { rotations: Record<string, [number, number, number, number]> }) =>
+        applyPose(ed.skeleton, pose),
+      reset: () => {
+        applyPose(ed.skeleton, { rotations: ed.restPose })
+        selectBone(null)
+      },
+      selectBone,
+      rotateSelectedBone,
+      getSelectedBone: () => currentSelection,
+      getActiveBones: () => ACTIVE_BONES.slice(),
+      getAllBoneNames: () => ed.allBoneNames.slice(),
+      addBoneSelectListener: (cb: (name: string | null) => void) => {
+        boneSelectListeners.push(cb)
+        return () => {
+          const i = boneSelectListeners.indexOf(cb)
+          if (i >= 0) boneSelectListeners.splice(i, 1)
+        }
+      },
+    }
+
+    if (cameraMode === 'editor') {
+      bonePicker.setActive(true)
+    }
+  })
 
   // Dev: expose scene/camera for headless QA + console tinkering
   ;(window as any).__bjs = { engine, scene, camera, fpCam, setCameraMode }
