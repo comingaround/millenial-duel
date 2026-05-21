@@ -19,6 +19,9 @@ export default function CameraToggle({
     const next = e.target.value as CameraMode
     onModeChange(next)
     ;(window as any).__bjs?.setCameraMode?.(next)
+    // Release focus — otherwise the <select>'s native type-ahead (E→Editor,
+    // F→Free, L→Locked) swallows those keys before the game's keydown handler.
+    e.target.blur()
   }
 
   return (
