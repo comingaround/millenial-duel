@@ -1,11 +1,9 @@
 import {
-  AbstractMesh,
   Animatable,
   Animation,
   Quaternion,
   Scene,
   Skeleton,
-  TransformNode,
   Vector3,
 } from '@babylonjs/core'
 
@@ -25,16 +23,12 @@ const FPS = 30
 // per affected bone (rotationQuaternion track) and running them in sync.
 // Returns the set of active Animatables so callers can stop if needed.
 //
-// `locomotionRoot` (optional): if provided, Hips bone X/Z translation gets
-// "promoted" to the root mesh's world position (character physically advances),
-// while Hips bone X/Z snap back to rest so the body doesn't visually slide.
-// Hips Y stays on the Hips bone (crouch / body shift).
-// Pass undefined to play purely as bone animation (e.g. editor preview).
+// Hips Y is the only position channel meant for body-shift use (crouch).
+// Character world locomotion lives elsewhere (per-anim forwardStep + input).
 export function playAnimation(
   scene: Scene,
   skeleton: Skeleton,
   keyframes: AnimationKeyframe[],
-  locomotionRoot?: AbstractMesh | TransformNode,
 ): Animatable[] {
   if (keyframes.length < 1) return []
 
@@ -109,84 +103,36 @@ export function playAnimation(
     animatables.push(ani)
   }
 
-  // Position tracks (Hips only in practice). Mirrors the rotation loop.
-  // When locomotionRoot is provided AND this is the Hips bone, X/Z components
-  // of the authored Hips position get promoted to a root.position track
-  // (character physically moves) and the Hips bone keys keep only the Y
-  // component (so the body's vertical shift / crouch is preserved).
+  // Position tracks (Hips only in practice). Mirrors the rotation loop:
+  // implicit frame-0 keyframe = current node.position when no explicit start.
   for (const boneName of positionBoneNames) {
     const bone = skeleton.bones.find((b) => b.name === boneName)
     const node = bone?._linkedTransformNode
     if (!node) continue
 
-    const promoteXZ = !!locomotionRoot && boneName === 'Hips'
-    const restPos = node.position.clone()  // captures local-parent rest
-
-    // --- Hips bone position track (Y always, X/Z only when not promoting) ---
-    const boneAnim = new Animation(
+    const anim = new Animation(
       `editor_pos_${boneName}`,
       'position',
       FPS,
       Animation.ANIMATIONTYPE_VECTOR3,
       Animation.ANIMATIONLOOPMODE_CONSTANT,
     )
-    const boneKeys: Array<{ frame: number; value: Vector3 }> = []
+    const keys: Array<{ frame: number; value: Vector3 }> = []
     if (!hasStart) {
-      boneKeys.push({ frame: 0, value: node.position.clone() })
+      keys.push({ frame: 0, value: node.position.clone() })
     }
     for (const kf of cleaned) {
       const p = kf.anchor.positions?.[boneName]
       if (!p) continue
-      const v = promoteXZ
-        ? new Vector3(restPos.x, p[1], restPos.z)   // keep only Y from authored
-        : new Vector3(p[0], p[1], p[2])
-      boneKeys.push({ frame: Math.round(kf.time * FPS), value: v })
+      keys.push({
+        frame: Math.round(kf.time * FPS),
+        value: new Vector3(p[0], p[1], p[2]),
+      })
     }
-    if (boneKeys.length >= 2) {
-      boneAnim.setKeys(boneKeys)
-      const ani = scene.beginDirectAnimation(node, [boneAnim], 0, totalFrames, false, 1.0)
-      animatables.push(ani)
-    }
-
-    // --- Root position track (only for Hips when locomotion is on) ---
-    if (promoteXZ && locomotionRoot) {
-      // Transform Hips local-parent XZ delta into world-space displacement
-      // using the root's rotation (so a "step right" on the editor knight
-      // becomes "step right relative to the character" on a rotated hero).
-      const rootStart = locomotionRoot.position.clone()
-      const rootKeys: Array<{ frame: number; value: Vector3 }> = []
-      if (!hasStart) {
-        rootKeys.push({ frame: 0, value: rootStart.clone() })
-      }
-      for (const kf of cleaned) {
-        const p = kf.anchor.positions?.[boneName]
-        if (!p) continue
-        // Local-parent delta from rest, X and Z only
-        const localDelta = new Vector3(p[0] - restPos.x, 0, p[2] - restPos.z)
-        // Convert through root's rotation. Vector3.TransformNormal applies
-        // the rotation portion of a world matrix to a direction vector.
-        const worldDelta = Vector3.TransformNormal(
-          localDelta,
-          locomotionRoot.getWorldMatrix(),
-        )
-        rootKeys.push({
-          frame: Math.round(kf.time * FPS),
-          value: rootStart.add(worldDelta),
-        })
-      }
-      if (rootKeys.length >= 2) {
-        const rootAnim = new Animation(
-          `editor_root_locomote`,
-          'position',
-          FPS,
-          Animation.ANIMATIONTYPE_VECTOR3,
-          Animation.ANIMATIONLOOPMODE_CONSTANT,
-        )
-        rootAnim.setKeys(rootKeys)
-        const ani = scene.beginDirectAnimation(locomotionRoot, [rootAnim], 0, totalFrames, false, 1.0)
-        animatables.push(ani)
-      }
-    }
+    if (keys.length < 2) continue
+    anim.setKeys(keys)
+    const ani = scene.beginDirectAnimation(node, [anim], 0, totalFrames, false, 1.0)
+    animatables.push(ani)
   }
 
   return animatables
