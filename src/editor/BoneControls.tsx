@@ -6,7 +6,7 @@ type Axis = 'x' | 'y' | 'z'
 const SENSITIVITY = 0.008   // rad per pixel of horizontal drag
 
 // Translation: stepper UI
-const POS_STEP_M = 0.003             // 3 mm per click / wheel notch (~1/3 cm)
+const POS_STEP_M = 0.0012            // 1.2 mm per click / wheel notch
 // Multi-step burst: consecutive translation interactions inside this window
 // count as ONE undo entry — keeps the undo stack from filling on wheel scrolls.
 const UNDO_BURST_MS = 300
@@ -190,7 +190,7 @@ export default function BoneControls() {
       {hasPositionControl && (
         <>
           <div style={{ ...titleStyle, marginTop: 16 }}>TRANSLATE</div>
-          <div style={subtitleStyle}>local position (m)</div>
+          <div style={subtitleStyle}>offset from rest (cm, world)</div>
           <div style={stepperColStyle}>
             <Stepper
               axis="x" label="X" color="#c44b4b"
@@ -341,6 +341,21 @@ function Stepper({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const lastStepTime = useRef(0)
 
+  // Display→underlying conversion. The `value` prop is in display units (e.g. cm)
+  // while `step` and `onStep` operate in underlying units (m). For cm display
+  // that's a 100x factor; for unitless or m it's 1.
+  const displayToUnderlying = unit === 'cm' ? 0.01 : unit === 'mm' ? 0.001 : 1
+
+  // Editable text state for the typed input. Synced from `value` only when
+  // not focused — otherwise the parent's frame-by-frame poll would clobber
+  // whatever the user is typing.
+  const [text, setText] = useState('')
+  const [focused, setFocused] = useState(false)
+  useEffect(() => {
+    if (focused) return
+    setText(value !== undefined ? value.toFixed(precision) : '')
+  }, [value, precision, focused])
+
   const beginActionMaybe = () => {
     // Push undo only when starting a new "burst" (no step in last UNDO_BURST_MS).
     // Lets a long wheel scroll or a rapid click streak collapse into one undo.
@@ -357,19 +372,37 @@ function Stepper({
     onStep(sign * step)
   }
 
+  const commitTyped = () => {
+    if (!enabled) {
+      setText(value !== undefined ? value.toFixed(precision) : '')
+      return
+    }
+    const n = parseFloat(text)
+    if (!Number.isFinite(n) || value === undefined) {
+      setText(value !== undefined ? value.toFixed(precision) : '')
+      return
+    }
+    const deltaDisplay = n - value
+    if (deltaDisplay === 0) return
+    ;(window as any).__editor?.pushUndo?.()
+    onStep(deltaDisplay * displayToUnderlying)
+    // Reset burst guard so the next click/scroll counts as a fresh action.
+    lastStepTime.current = 0
+  }
+
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
       if (!enabled) return
-      // preventDefault requires non-passive listener (React's onWheel is
-      // passive by default in modern React/browsers).
+      // Don't fight the typed input — let native wheel-step the number while focused.
+      if (focused) return
       e.preventDefault()
       doStep(e.deltaY < 0 ? 1 : -1)
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [enabled])
+  }, [enabled, focused])
 
   return (
     <div
@@ -379,7 +412,7 @@ function Stepper({
         opacity: enabled ? 1 : 0.35,
         borderLeft: `3px solid ${color}`,
       }}
-      title={enabled ? 'Click ± · scroll to step' : 'Select a bone first'}
+      title={enabled ? 'Click ± · scroll to step · type a number + Enter to jump' : 'Select a bone first'}
     >
       <span style={{ ...stepperAxisStyle, color }}>{label}</span>
       <button
@@ -388,9 +421,30 @@ function Stepper({
         onClick={() => doStep(-1)}
         style={{ ...stepperBtnStyle, cursor: enabled ? 'pointer' : 'not-allowed' }}
       >−</button>
-      <span style={stepperValueStyle}>
-        {value !== undefined ? `${value.toFixed(precision)}${unit}` : '—'}
-      </span>
+      <input
+        type="text"
+        inputMode="decimal"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onFocus={(e) => {
+          setFocused(true)
+          e.target.select()
+        }}
+        onBlur={() => {
+          setFocused(false)
+          commitTyped()
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          if (e.key === 'Escape') {
+            setText(value !== undefined ? value.toFixed(precision) : '')
+            ;(e.target as HTMLInputElement).blur()
+          }
+        }}
+        disabled={!enabled}
+        style={stepperInputStyle}
+      />
+      <span style={stepperUnitStyle}>{unit}</span>
       <button
         type="button"
         disabled={!enabled}
@@ -683,13 +737,25 @@ const stepperBtnStyle: CSSProperties = {
   userSelect: 'none',
 }
 
-const stepperValueStyle: CSSProperties = {
+const stepperInputStyle: CSSProperties = {
   flex: 1,
+  minWidth: 0,
   fontFamily: 'monospace',
   fontSize: 12,
   letterSpacing: 0.3,
   textAlign: 'center',
   color: 'rgba(255, 255, 255, 0.92)',
+  background: 'rgba(255, 255, 255, 0.04)',
+  border: '1px solid rgba(255, 255, 255, 0.12)',
+  borderRadius: 3,
+  padding: '2px 4px',
+  outline: 'none',
+}
+
+const stepperUnitStyle: CSSProperties = {
+  opacity: 0.5,
+  fontSize: 10,
+  marginLeft: -2,
 }
 
 const hintStyle: CSSProperties = {

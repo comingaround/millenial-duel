@@ -5,6 +5,7 @@ import {
   Engine,
   Quaternion,
   Scene,
+  Space,
   UniversalCamera,
   Vector3,
 } from '@babylonjs/core'
@@ -267,18 +268,25 @@ export function createEngine(
       node.rotationQuaternion = node.rotationQuaternion.multiply(offset)
     }
 
-    // Translate the selected bone's local position. Currently only valid
-    // for bones in POSITION_BONES (Hips) — silently no-ops for others so
-    // limbs can't be stretched by accidental drags.
+    // Translate the selected bone in WORLD space (X=screen-right, Y=up,
+    // Z=screen-forward). Babylon stores node.position in parent-local space,
+    // but the rig's parent-local axes are rotated by the Blender→Babylon
+    // conversion, so editing position.xyz directly produces axis-mixing
+    // (X mostly fine, Y becomes forward, Z becomes up + side). Using
+    // node.translate(axis, dist, Space.WORLD) lets Babylon do the parent-
+    // inverse-transform math, so the user's intent matches what they see.
+    // Only valid for POSITION_BONES (Hips) — silently no-ops for others.
     const translateSelectedBone = (axis: 'x' | 'y' | 'z', delta: number) => {
       if (!currentSelection) return
       if (!POSITION_BONES.includes(currentSelection)) return
       const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
       const node = bone?._linkedTransformNode
       if (!node) return
-      if (axis === 'x') node.position.x += delta
-      else if (axis === 'y') node.position.y += delta
-      else node.position.z += delta
+      const dir =
+        axis === 'x' ? Vector3.Right()
+        : axis === 'y' ? Vector3.Up()
+        : Vector3.Forward()
+      node.translate(dir, delta, Space.WORLD)
     }
 
     let activeAnimatables: Animatable[] = []
@@ -340,14 +348,25 @@ export function createEngine(
       return { x: e.x * R2D, y: e.y * R2D, z: e.z * R2D }
     }
 
-    // Read selected bone's local position (only meaningful for POSITION_BONES).
+    // Read the selected bone's WORLD-space translation delta from its rest
+    // world position (only meaningful for POSITION_BONES). World-space — not
+    // local-parent — because that's what matches the user's screen-axis
+    // intuition and what translateSelectedBone now operates in.
     const getSelectedBonePosition = () => {
       if (!currentSelection) return null
       if (!POSITION_BONES.includes(currentSelection)) return null
       const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
       const node = bone?._linkedTransformNode
       if (!node) return null
-      return { x: node.position.x, y: node.position.y, z: node.position.z }
+      const restWorld = ed.restWorldPositions[currentSelection]
+      if (!restWorld) return null
+      node.computeWorldMatrix(true)
+      const wp = node.getAbsolutePosition()
+      return {
+        x: wp.x - restWorld[0],
+        y: wp.y - restWorld[1],
+        z: wp.z - restWorld[2],
+      }
     }
 
     // Capture original editor material colors NOW, before any user edits.

@@ -72,6 +72,9 @@ export type EditorSceneApi = {
   allBoneNames: string[]      // full list for the panel
   restPose: Record<string, [number, number, number, number]>
   restPositions: Record<string, [number, number, number]>
+  // World-space rest positions for POSITION_BONES — used by the editor's
+  // readout to show world-space deltas instead of confusing local-parent ones.
+  restWorldPositions: Record<string, [number, number, number]>
   position: Vector3
   animationGroups: any[]      // baked anims from the GLB
 }
@@ -136,6 +139,9 @@ export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> 
       // for bones in POSITION_BONES — Hips only — so Reset can restore both).
       const restPose: Record<string, [number, number, number, number]> = {}
       const restPositions: Record<string, [number, number, number]> = {}
+      const restWorldPositions: Record<string, [number, number, number]> = {}
+      // Make sure world matrices are up-to-date before reading absolute pos.
+      root.computeWorldMatrix(true)
       for (const bone of skeleton.bones) {
         const node = bone._linkedTransformNode
         if (!node) continue
@@ -146,6 +152,9 @@ export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> 
         if (POSITION_BONES.includes(bone.name)) {
           const p = node.position
           restPositions[bone.name] = [p.x, p.y, p.z]
+          node.computeWorldMatrix(true)
+          const wp = node.getAbsolutePosition()
+          restWorldPositions[bone.name] = [wp.x, wp.y, wp.z]
         }
       }
 
@@ -159,6 +168,7 @@ export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> 
         allBoneNames,
         restPose,
         restPositions,
+        restWorldPositions,
         position: POSITION.clone(),
         animationGroups: result.animationGroups,
       }
