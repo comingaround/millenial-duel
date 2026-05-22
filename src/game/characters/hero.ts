@@ -157,7 +157,8 @@ export function createHero(scene: Scene): Promise<HeroApi | null> {
 
       const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
         combatIdle?.pause()
-        playAnimation(scene, skeleton, keyframes)
+        // Passing root enables Hips X/Z → root locomotion (Option 1).
+        playAnimation(scene, skeleton, keyframes, root)
         // After approximate duration, resume idle
         const lastTime = keyframes[keyframes.length - 1]?.time ?? 0
         setTimeout(() => combatIdle?.play(true), Math.max(50, lastTime * 1000 + 200))

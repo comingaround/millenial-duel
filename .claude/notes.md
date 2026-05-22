@@ -450,6 +450,7 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - **Vague descriptions are expected** — when user says "rotate the sword 90deg", clarify the axis and try one, but expect a couple of rounds. They've offered to take over the animation tinkering themselves since 3D rotation is hard to describe in text.
 - **Color/texture descriptions** — user is okay with stylized solid colors as long as the proportions look right. The grass/trees/buildings established a "low-poly stylized" baseline; matching that is what counts.
 - **Use Playwright proactively** — user said "use playwright to access web and QA yourself, so after each coding, QA what you did and then confirm". Don't submit code without a screenshot verification.
+- **"What will it do?" = describe the EFFECT, not the implementation.** When proposing options or explaining changes, lead with what the user will *experience* (character moves forward, button appears, foot stays planted). Skip line counts, schema fields, code paths, and "implementation cost" unless they explicitly ask for code specifics. Stay brief.
 
 ## File-specific notes
 

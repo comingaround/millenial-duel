@@ -6,7 +6,7 @@ type Axis = 'x' | 'y' | 'z'
 const SENSITIVITY = 0.008   // rad per pixel of horizontal drag
 
 // Translation: stepper UI
-const POS_STEP_M = 0.0012            // 1.2 mm per click / wheel notch
+const POS_STEP_M = 0.01              // 1 cm per click / wheel notch
 // Multi-step burst: consecutive translation interactions inside this window
 // count as ONE undo entry — keeps the undo stack from filling on wheel scrolls.
 const UNDO_BURST_MS = 300
