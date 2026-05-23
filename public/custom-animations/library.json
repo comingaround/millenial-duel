@@ -2291,36 +2291,6 @@
   ],
   "animations": [
     {
-      "id": "anim_1779384449089",
-      "name": "R-top",
-      "keyframes": [
-        {
-          "anchorId": "anch_1779384372675_1d5o",
-          "time": 0.3,
-          "displacement": [
-            0,
-            0,
-            0
-          ]
-        },
-        {
-          "anchorId": "anch_1779384372675_hx8q",
-          "time": 0.6,
-          "displacement": [
-            0,
-            0,
-            0.5
-          ]
-        },
-        {
-          "anchorId": "__initial__",
-          "time": 0.9
-        }
-      ],
-      "heroKey": "q",
-      "oppKey": "u"
-    },
-    {
       "id": "anim_1779385844006",
       "name": "Stab",
       "keyframes": [
@@ -2443,6 +2413,25 @@
             0,
             0,
             0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "anim_1779537082911",
+      "name": "R-top",
+      "keyframes": [
+        {
+          "anchorId": "anch_1779384372675_1d5o",
+          "time": 0.3
+        },
+        {
+          "anchorId": "anch_1779384372675_hx8q",
+          "time": 0.6,
+          "displacement": [
+            0,
+            0,
+            0.5
           ]
         }
       ]

@@ -12,12 +12,14 @@ import {
 import { POSITION_BONES } from './pose-store'
 
 // Editor knight area — two instances facing each other for combat practice.
-// Model 1 sits at -X side facing +X; Model 2 at +X side facing -X.
-// The editor camera target is between them (50, 1, 0).
-const MODEL1_POSITION = new Vector3(49.0, 0, 0)
-const MODEL2_POSITION = new Vector3(51.0, 0, 0)
-const MODEL1_YROT = -Math.PI / 2     // face +X (toward Model 2)
-const MODEL2_YROT = Math.PI / 2      // face -X (toward Model 1)
+// Model 1 keeps the original editor-knight world position (50, 0, 0); Model 2
+// stands ~1.5m to the +X side. Both face each other along the X axis.
+// (Knight's natural forward direction in the GLB is -Z, so rotations here
+// orient that local axis to face the other model.)
+const MODEL1_POSITION = new Vector3(50.0, 0, 0)
+const MODEL2_POSITION = new Vector3(51.5, 0, 0)   // 1.5m gap
+const MODEL1_YROT = -Math.PI / 2     // local -Z → +X (faces Model 2)
+const MODEL2_YROT =  Math.PI / 2     // local -Z → -X (faces Model 1)
 
 // Active bones: combat-relevant subset of the rig.
 //   Torso/head — Hips (whole-body lean), Spine, Chest, Neck, Head

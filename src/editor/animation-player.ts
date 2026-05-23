@@ -179,8 +179,11 @@ export function playAnimation(
         const d = kf.displacement ?? [0, 0, 0]
         cumulative.x += d[0]
         cumulative.y += d[1]
-        cumulative.z += d[2]
-        // Apply ONLY rotation (no scale) to convert local cumulative → world delta
+        // Knight GLB has -Z as its natural forward axis (artist convention).
+        // User authors "+Z = forward" intent, so negate to put it in the
+        // model's local frame before rotation. Without this, +Z displacement
+        // moves the character backwards.
+        cumulative.z -= d[2]
         const worldDelta = Vector3.Zero()
         cumulative.rotateByQuaternionToRef(rotQuat, worldDelta)
         rootKeys.push({

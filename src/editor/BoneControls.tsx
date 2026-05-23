@@ -124,14 +124,14 @@ export default function BoneControls() {
         </button>
       </div>
 
-      {/* Always-visible BODY POSITION readout (world-space, from rest base) */}
+      {/* Always-visible BODY POSITION readout — active model's WORLD coords (metres). */}
       <div style={bodyPosBlockStyle}>
-        <div style={bodyPosLabelStyle}>BODY POSITION</div>
+        <div style={bodyPosLabelStyle}>BODY POSITION (world)</div>
         <div style={bodyPosRowStyle}>
-          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>X</span>{(bodyPos.x * 100).toFixed(0)}</span>
-          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>Y</span>{(bodyPos.y * 100).toFixed(0)}</span>
-          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>Z</span>{(bodyPos.z * 100).toFixed(0)}</span>
-          <span style={{ fontSize: 9, opacity: 0.4, marginLeft: 2 }}>cm</span>
+          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>X</span>{bodyPos.x.toFixed(2)}</span>
+          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>Y</span>{bodyPos.y.toFixed(2)}</span>
+          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>Z</span>{bodyPos.z.toFixed(2)}</span>
+          <span style={{ fontSize: 9, opacity: 0.4, marginLeft: 2 }}>m</span>
         </div>
       </div>
 

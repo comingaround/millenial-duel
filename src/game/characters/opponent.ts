@@ -1,10 +1,7 @@
 import '@babylonjs/loaders/glTF'
 import {
-  Animation,
-  AnimationGroup,
   Color3,
   Mesh,
-  Quaternion,
   Scene,
   SceneLoader,
   StandardMaterial,
@@ -34,8 +31,8 @@ const MAT_COLORS: Record<string, Color3> = {
 const FALLBACK = new Color3(0.55, 0.55, 0.55)
 
 export type OpponentApi = {
-  playSlash: () => void
-  playBlock: () => void
+  // Empty for now — combat actions are user-authored animations bound to
+  // keys via the editor's animation row.
 }
 
 export function createOpponent(scene: Scene): Promise<OpponentApi | null> {
@@ -77,82 +74,8 @@ export function createOpponent(scene: Scene): Promise<OpponentApi | null> {
       result.animationGroups.forEach((g) => g.stop())
       combatIdle?.start(true)
 
-      // --- Block animation (coded, since the GLB doesn't ship one) ---
-      // Rotate Upper Arm.L so the arm raises in front + up, bringing the
-      // shield (held in Hand.L) toward the head. Forearm + hand follow as
-      // children — no separate keyframes needed for them.
-      const upperArmL = skeleton?.bones.find((b) => b.name === 'Upper Arm.L') ?? null
-      let restQuatL: Quaternion | null = null
-      if (upperArmL) {
-        upperArmL.rotationQuaternion =
-          upperArmL.rotationQuaternion ?? upperArmL.rotation.toQuaternion()
-        restQuatL = upperArmL.rotationQuaternion.clone()
-      }
-
-      // Block = small shoulder rotation that lifts the elbow ~30cm while
-      // keeping the shield nearly vertical (pure translation would stretch
-      // the skinned arm; small rotation is the clean way).
-      const upperArmLNode = upperArmL?._linkedTransformNode
-        ?? scene.getTransformNodeByName('Upper Arm.L')
-      const ensureQuat = (n: typeof upperArmLNode) => {
-        if (!n) return null
-        n.rotationQuaternion = n.rotationQuaternion ?? n.rotation.toQuaternion()
-        return n.rotationQuaternion.clone()
-      }
-      const restUpperL = ensureQuat(upperArmLNode)
-
-      let blockActive = false
-      const playBlock = () => {
-        if (!upperArmLNode || !restUpperL || blockActive) return
-        blockActive = true
-        combatIdle?.pause()
-
-        // ~40° rotation around local X — small enough to barely tilt the
-        // shield, big enough to lift elbow ~30cm at ~0.5m arm length.
-        const offset = Quaternion.RotationAxis(new Vector3(1, 0, 0), Math.PI * 0.22)
-        const blockQuat = restUpperL.multiply(offset)
-
-        const anim = new Animation(
-          'opp_block', 'rotationQuaternion', 30,
-          Animation.ANIMATIONTYPE_QUATERNION,
-          Animation.ANIMATIONLOOPMODE_CONSTANT,
-        )
-        anim.setKeys([
-          { frame: 0,  value: restUpperL.clone() },
-          { frame: 6,  value: blockQuat },
-          { frame: 18, value: blockQuat },
-          { frame: 26, value: restUpperL.clone() },
-        ])
-        scene.beginDirectAnimation(
-          upperArmLNode, [anim], 0, 26, false, 1.0,
-          () => {
-            blockActive = false
-            upperArmLNode.rotationQuaternion = restUpperL.clone()
-            combatIdle?.play(true)
-          },
-        )
-      }
-
-      let slashActive = false
-      const playSlash = () => {
-        if (!slashAnim || slashActive) return
-        slashActive = true
-        // Pause idle while slash plays so it doesn't fight for the bones
-        combatIdle?.pause()
-        slashAnim.stop()
-        slashAnim.onAnimationGroupEndObservable.addOnce(() => {
-          slashActive = false
-          combatIdle?.play(true)
-        })
-        slashAnim.start(false, 1.0)
-      }
-
       console.log(
-        `[opponent] knight loaded — ${result.meshes.length} meshes, ` +
-          `${result.skeletons.length} skeletons, ` +
-          `${result.animationGroups.length} animations. ` +
-          `Slash:${slashAnim ? 'yes' : 'NO'} Idle:${combatIdle ? 'yes' : 'NO'} ` +
-          `UpperArmL:${upperArmL ? 'yes' : 'NO'}`,
+        `[opponent] knight loaded — ${result.meshes.length} meshes`,
       )
 
       const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
@@ -165,7 +88,7 @@ export function createOpponent(scene: Scene): Promise<OpponentApi | null> {
 
       const api: OpponentApi & {
         playCustomAnimation: (kfs: AnimationKeyframe[]) => void
-      } = { playSlash, playBlock, playCustomAnimation }
+      } = { playCustomAnimation }
       ;(window as any).__opponent = api
       return api
     })

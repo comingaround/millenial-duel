@@ -1,9 +1,7 @@
 import '@babylonjs/loaders/glTF'
 import {
-  Animation,
   Color3,
   Mesh,
-  Quaternion,
   Scene,
   SceneLoader,
   StandardMaterial,
@@ -43,8 +41,6 @@ const HIDDEN_MESHES = new Set(['Helmet', 'Hair'])
 import type { TransformNode } from '@babylonjs/core'
 
 export type HeroApi = {
-  playStrike: () => void
-  playBlock: () => void
   getHeadNode: () => TransformNode | null
 }
 
@@ -99,60 +95,8 @@ export function createHero(scene: Scene): Promise<HeroApi | null> {
       const headBone = skeleton?.bones.find((b) => b.name === 'Head')
       const headNode = headBone?._linkedTransformNode ?? null
 
-      // --- Hero's block (mirror of opponent's coded block) ---
-      const upperArmL = skeleton?.bones.find((b) => b.name === 'Upper Arm.L')
-      const upperArmLNode = upperArmL?._linkedTransformNode ?? null
-      let restUpperL: Quaternion | null = null
-      if (upperArmLNode) {
-        upperArmLNode.rotationQuaternion =
-          upperArmLNode.rotationQuaternion ?? upperArmLNode.rotation.toQuaternion()
-        restUpperL = upperArmLNode.rotationQuaternion.clone()
-      }
-
-      let blockActive = false
-      const playBlock = () => {
-        if (!upperArmLNode || !restUpperL || blockActive) return
-        blockActive = true
-        combatIdle?.pause()
-        const offset = Quaternion.RotationAxis(new Vector3(1, 0, 0), Math.PI * 0.22)
-        const blockQuat = restUpperL.multiply(offset)
-        const anim = new Animation(
-          'hero_block', 'rotationQuaternion', 30,
-          Animation.ANIMATIONTYPE_QUATERNION,
-          Animation.ANIMATIONLOOPMODE_CONSTANT,
-        )
-        anim.setKeys([
-          { frame: 0,  value: restUpperL.clone() },
-          { frame: 6,  value: blockQuat },
-          { frame: 18, value: blockQuat },
-          { frame: 26, value: restUpperL.clone() },
-        ])
-        scene.beginDirectAnimation(
-          upperArmLNode, [anim], 0, 26, false, 1.0,
-          () => {
-            blockActive = false
-            upperArmLNode.rotationQuaternion = restUpperL!.clone()
-            combatIdle?.play(true)
-          },
-        )
-      }
-
-      let strikeActive = false
-      const playStrike = () => {
-        if (!slashAnim || strikeActive) return
-        strikeActive = true
-        combatIdle?.pause()
-        slashAnim.stop()
-        slashAnim.onAnimationGroupEndObservable.addOnce(() => {
-          strikeActive = false
-          combatIdle?.play(true)
-        })
-        slashAnim.start(false, 1.0)
-      }
-
       console.log(
-        `[hero] knight loaded — ${result.meshes.length} meshes, ` +
-          `Strike:${slashAnim ? 'yes' : 'NO'} Block:${upperArmLNode ? 'yes' : 'NO'}`,
+        `[hero] knight loaded — ${result.meshes.length} meshes`,
       )
 
       const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
@@ -166,8 +110,6 @@ export function createHero(scene: Scene): Promise<HeroApi | null> {
       const api: HeroApi & {
         playCustomAnimation: (kfs: AnimationKeyframe[]) => void
       } = {
-        playStrike,
-        playBlock,
         getHeadNode: () => headNode,
         playCustomAnimation,
       }

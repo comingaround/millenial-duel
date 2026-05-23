@@ -110,8 +110,8 @@ export function createEngine(
     'editor_cam',
     Math.PI / 2,             // looking from +Z; models face each other along X
     Math.PI / 2.4,
-    5,                       // a bit further so both knights fit in frame
-    new Vector3(50, 1.0, 0),
+    5,
+    new Vector3(50.75, 1.0, 0),  // midpoint between Model 1 (50) and Model 2 (51.5)
     scene,
   )
   editorCam.fov = 0.9
@@ -195,10 +195,9 @@ export function createEngine(
         }
       }
     }
-    if (e.key === 'u' || e.key === 'U')   (window as any).__opponent?.playSlash?.()
-    if (e.key === 'Enter')                (window as any).__opponent?.playBlock?.()
-    if (e.key === 'q' || e.key === 'Q')   (window as any).__hero?.playStrike?.()
-    if (e.key === ' ')                  { e.preventDefault(); (window as any).__hero?.playBlock?.() }
+    // Legacy hardcoded Q/U/Space/Enter bindings removed — combat actions
+    // are now authored in the editor and bound to user-chosen keys via the
+    // animation row's Hero/Opp key inputs.
   }
   const onKeyUp = (e: KeyboardEvent) => {
     if (arrowSet.has(e.key)) { e.preventDefault(); setKey(e.key, false) }
@@ -400,13 +399,16 @@ export function createEngine(
         const m = active()
         activeAnimatables = playAnimation(scene, m.skeleton, keyframes, m.root)
       },
+      // ABSOLUTE world position of the active model's root (metres).
+      // Map-central, not model-relative — so you see where each model
+      // actually is in the scene (Model 1 starts at X≈50, Model 2 at X≈51.5).
       getBodyPosition: () => {
         const m = active()
         m.root.computeWorldMatrix(true)
         return {
-          x: m.root.position.x - m.position.x,
-          y: m.root.position.y - m.position.y,
-          z: m.root.position.z - m.position.z,
+          x: m.root.position.x,
+          y: m.root.position.y,
+          z: m.root.position.z,
         }
       },
       stopAnimation: () => stopActiveAnimation(),
