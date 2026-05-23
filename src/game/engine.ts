@@ -105,12 +105,12 @@ export function createEngine(
   // Disable WASD on the FPS camera (don't want keyboard to move it)
   fpCam.inputs.removeByType('FreeCameraKeyboardMoveInput')
 
-  // --- Third camera: Editor. Orbits the standalone editor knight. ---
+  // --- Third camera: Editor. Orbits the editor area (Model 1 + Model 2). ---
   const editorCam = new ArcRotateCamera(
     'editor_cam',
-    Math.PI / 2,             // facing knight from his front (knight defaults facing -Z)
+    Math.PI / 2,             // looking from +Z; models face each other along X
     Math.PI / 2.4,
-    4,
+    5,                       // a bit further so both knights fit in frame
     new Vector3(50, 1.0, 0),
     scene,
   )
@@ -233,12 +233,17 @@ export function createEngine(
   createOpponent(scene)
   createHero(scene)
 
-  // --- Editor: load standalone knight + wire bone picker + custom rotation API ---
+  // --- Editor: load TWO knights facing each other + wire bone picker etc ---
   createEditorScene(scene).then((ed) => {
     if (!ed) return
-    bonePicker = createBonePicker(scene, ed.skeleton, ACTIVE_BONES)
-    editorGizmo = createEditorGizmo(scene, ed.skeleton)
-    // Babylon's gizmo rings disabled — we use our own 3-sphere UI on the right.
+
+    // Active model index — bone control, anim playback, reset all operate
+    // on this one. Switchable via __editor.setActiveModel(0|1).
+    let activeIdx = 0
+    const active = () => ed.models[activeIdx]
+
+    bonePicker = createBonePicker(scene, active().skeleton, ACTIVE_BONES)
+    editorGizmo = createEditorGizmo(scene, active().skeleton)
     editorGizmo.setActive(false)
 
     let currentSelection: string | null = null
@@ -254,7 +259,7 @@ export function createEngine(
 
     const rotateSelectedBone = (axis: 'x' | 'y' | 'z', deltaRad: number) => {
       if (!currentSelection) return
-      const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
+      const bone = active().skeleton.bones.find((b) => b.name === currentSelection)
       const node = bone?._linkedTransformNode
       if (!node) return
       node.rotationQuaternion =
@@ -264,22 +269,13 @@ export function createEngine(
         : axis === 'y' ? new Vector3(0, 1, 0)
         : new Vector3(0, 0, 1)
       const offset = Quaternion.RotationAxis(ax, deltaRad)
-      // Post-multiply: rotation is in the bone's LOCAL frame
       node.rotationQuaternion = node.rotationQuaternion.multiply(offset)
     }
 
-    // Translate the selected bone in WORLD space (X=screen-right, Y=up,
-    // Z=screen-forward). Babylon stores node.position in parent-local space,
-    // but the rig's parent-local axes are rotated by the Blender→Babylon
-    // conversion, so editing position.xyz directly produces axis-mixing
-    // (X mostly fine, Y becomes forward, Z becomes up + side). Using
-    // node.translate(axis, dist, Space.WORLD) lets Babylon do the parent-
-    // inverse-transform math, so the user's intent matches what they see.
-    // Only valid for POSITION_BONES (Hips) — silently no-ops for others.
     const translateSelectedBone = (axis: 'x' | 'y' | 'z', delta: number) => {
       if (!currentSelection) return
       if (!POSITION_BONES.includes(currentSelection)) return
-      const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
+      const bone = active().skeleton.bones.find((b) => b.name === currentSelection)
       const node = bone?._linkedTransformNode
       if (!node) return
       const dir =
@@ -297,11 +293,8 @@ export function createEngine(
       }
     }
 
-    // --- Undo / Redo stacks (last N bone-rotation snapshots each) ---
-    // pushUndo: snapshot current → undo, clear redo (new action invalidates
-    //   any redoable forward history — standard editor behavior).
-    // undo: snapshot current → redo, then pop undo and apply.
-    // redo: snapshot current → undo, then pop redo and apply.
+    // Undo / Redo (cleared on active-model switch — snapshots are model-
+    // specific in practice).
     const MAX_UNDO = 40
     type Snap = {
       rotations: Record<string, [number, number, number, number]>
@@ -310,7 +303,7 @@ export function createEngine(
     const undoStack: Snap[] = []
     const redoStack: Snap[] = []
     const captureCurrent = (): Snap => {
-      const s = snapshotPose(ed.skeleton, '__snap__')
+      const s = snapshotPose(active().skeleton, '__snap__')
       return { rotations: s.rotations, positions: s.positions ?? {} }
     }
     const pushUndo = () => {
@@ -324,7 +317,7 @@ export function createEngine(
       if (!prev) return false
       redoStack.push(captureCurrent())
       if (redoStack.length > MAX_UNDO) redoStack.shift()
-      applyPose(ed.skeleton, prev)
+      applyPose(active().skeleton, prev)
       return true
     }
     const redo = () => {
@@ -333,14 +326,13 @@ export function createEngine(
       if (!next) return false
       undoStack.push(captureCurrent())
       if (undoStack.length > MAX_UNDO) undoStack.shift()
-      applyPose(ed.skeleton, next)
+      applyPose(active().skeleton, next)
       return true
     }
 
-    // Read selected bone rotation as Euler angles (degrees) — for the UI readout
     const getSelectedBoneEuler = () => {
       if (!currentSelection) return null
-      const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
+      const bone = active().skeleton.bones.find((b) => b.name === currentSelection)
       const node = bone?._linkedTransformNode
       if (!node || !node.rotationQuaternion) return null
       const e = node.rotationQuaternion.toEulerAngles()
@@ -348,17 +340,14 @@ export function createEngine(
       return { x: e.x * R2D, y: e.y * R2D, z: e.z * R2D }
     }
 
-    // Read the selected bone's WORLD-space translation delta from its rest
-    // world position (only meaningful for POSITION_BONES). World-space — not
-    // local-parent — because that's what matches the user's screen-axis
-    // intuition and what translateSelectedBone now operates in.
     const getSelectedBonePosition = () => {
       if (!currentSelection) return null
       if (!POSITION_BONES.includes(currentSelection)) return null
-      const bone = ed.skeleton.bones.find((b) => b.name === currentSelection)
+      const m = active()
+      const bone = m.skeleton.bones.find((b) => b.name === currentSelection)
       const node = bone?._linkedTransformNode
       if (!node) return null
-      const restWorld = ed.restWorldPositions[currentSelection]
+      const restWorld = m.restWorldPositions[currentSelection]
       if (!restWorld) return null
       node.computeWorldMatrix(true)
       const wp = node.getAbsolutePosition()
@@ -369,8 +358,7 @@ export function createEngine(
       }
     }
 
-    // Capture original editor material colors NOW, before any user edits.
-    // This is the baseline for the Style panel's Reset button.
+    // Material colour baseline for Style-panel Reset (same as before).
     const editorMaterialBaseline = new Map<string, string>()
     for (const m of scene.materials as any[]) {
       if (typeof m.name === 'string' && m.name.startsWith('editor_')) {
@@ -379,23 +367,19 @@ export function createEngine(
     }
 
     ;(window as any).__editor = {
-      snapshot: (name: string) => snapshotPose(ed.skeleton, name),
+      snapshot: (name: string) => snapshotPose(active().skeleton, name),
       apply: (pose: {
         rotations: Record<string, [number, number, number, number]>
         positions?: Record<string, [number, number, number]>
       }) => {
         stopActiveAnimation()
-        applyPose(ed.skeleton, pose)
+        applyPose(active().skeleton, pose)
       },
       reset: () => {
         stopActiveAnimation()
-        applyPose(ed.skeleton, {
-          rotations: ed.restPose,
-          positions: ed.restPositions,
-        })
-        // Reset editor knight's world position too — body position readout
-        // will go back to 0/0/0 since it shows offset from this base.
-        ed.root.position.copyFrom(ed.position)
+        const m = active()
+        applyPose(m.skeleton, { rotations: m.restPose, positions: m.restPositions })
+        m.root.position.copyFrom(m.position)
         selectBone(null)
       },
       selectBone,
@@ -413,19 +397,16 @@ export function createEngine(
       },
       playAnimation: (keyframes: AnimationKeyframe[]) => {
         stopActiveAnimation()
-        // Pass editor knight's root → keyframe displacement values physically
-        // translate the editor knight during preview, so the author sees the
-        // actual character motion (not just bones moving in place).
-        activeAnimatables = playAnimation(scene, ed.skeleton, keyframes, ed.root)
+        const m = active()
+        activeAnimatables = playAnimation(scene, m.skeleton, keyframes, m.root)
       },
-      // Live body-position readout: editor knight's current world position
-      // minus its starting world position (so it reads 0/0/0 when reset).
       getBodyPosition: () => {
-        ed.root.computeWorldMatrix(true)
+        const m = active()
+        m.root.computeWorldMatrix(true)
         return {
-          x: ed.root.position.x - ed.position.x,
-          y: ed.root.position.y - ed.position.y,
-          z: ed.root.position.z - ed.position.z,
+          x: m.root.position.x - m.position.x,
+          y: m.root.position.y - m.position.y,
+          z: m.root.position.z - m.position.z,
         }
       },
       stopAnimation: () => stopActiveAnimation(),
@@ -435,10 +416,6 @@ export function createEngine(
           from: g.from,
           to: g.to,
         })),
-      // Sample a baked anim at frames, returning anchors + their times.
-      // `sampleCount === 0` → use the ORIGINAL keyframes the artist authored
-      // (union of every targeted bone's keyframe times). Otherwise sample at
-      // N evenly-spaced frames across the full range.
       importBakedAnimation: (
         animName: string,
         sampleCount = 0,
@@ -452,7 +429,6 @@ export function createEngine(
         const fps = 30
         let frames: number[] = []
         if (sampleCount === 0) {
-          // Use the union of all keyframe times from every targeted bone
           const set = new Set<number>()
           for (const ta of group.targetedAnimations) {
             const keys = ta.animation.getKeys()
@@ -461,17 +437,13 @@ export function createEngine(
             }
           }
           frames = Array.from(set).sort((a, b) => a - b)
-          if (frames.length < 2) {
-            // Fallback if the anim only has a single key somewhere
-            frames = [fromFrame, toFrame]
-          }
+          if (frames.length < 2) frames = [fromFrame, toFrame]
         } else {
           for (let i = 0; i < sampleCount; i++) {
             const t = i / (sampleCount - 1)
             frames.push(Math.round(fromFrame + (toFrame - fromFrame) * t))
           }
         }
-        // Start playing the group so goToFrame works, then pause + walk
         stopActiveAnimation()
         group.start(false, 1.0)
         group.pause()
@@ -480,18 +452,17 @@ export function createEngine(
           rotations: Record<string, [number, number, number, number]>
         }[] = []
         const durations: number[] = []
+        // Sample from MODEL 1's skeleton (which the baked groups target).
+        const m1 = ed.models[0]
         for (let i = 0; i < frames.length; i++) {
           group.goToFrame(frames[i])
-          // Force skeleton matrices to refresh
-          for (const s of ed.skeletons) s.prepare()
-          const snap = snapshotPose(ed.skeleton, `${animName}_${i + 1}`)
+          for (const s of m1.skeletons) s.prepare()
+          const snap = snapshotPose(m1.skeleton, `${animName}_${i + 1}`)
           anchors.push({ name: snap.name, rotations: snap.rotations })
           durations.push((frames[i] - fromFrame) / fps)
         }
         group.stop()
-        // Restore rest pose so the editor knight isn't stuck at the last
-        // sample's bones
-        applyPose(ed.skeleton, { rotations: ed.restPose })
+        applyPose(m1.skeleton, { rotations: m1.restPose })
         return { anchors, durations }
       },
       pushUndo,
@@ -502,13 +473,7 @@ export function createEngine(
       getSelectedBoneEuler,
       getSelectedBonePosition,
       hasPositionControl: (boneName: string) => POSITION_BONES.includes(boneName),
-      // Right-panel can flip the bone-picker spheres off when switching to
-      // Style mode so the armor is visually clear.
-      setBonePickerActive: (active: boolean) => {
-        bonePicker?.setActive(active)
-      },
-      // Editor-knight materials — list + recolor for the Style panel. Materials
-      // were created as `editor_${matName}` in editor-scene.ts.
+      setBonePickerActive: (a: boolean) => bonePicker?.setActive(a),
       getEditorMaterials: () => {
         return scene.materials
           .filter((m: any) => typeof m.name === 'string' && m.name.startsWith('editor_'))
@@ -525,7 +490,6 @@ export function createEngine(
         mat.diffuseColor = c
         mat.ambientColor = c.scale(0.5)
       },
-      // Restore every editor_* material to its scene-load color.
       resetEditorMaterials: () => {
         for (const m of scene.materials as any[]) {
           if (typeof m.name !== 'string' || !m.name.startsWith('editor_')) continue
@@ -536,10 +500,26 @@ export function createEngine(
           m.ambientColor = c.scale(0.5)
         }
       },
+      // --- Multi-model management ---
+      getModels: () => ed.models.map((m) => m.name),
+      getActiveModelIndex: () => activeIdx,
+      setActiveModel: (idx: number) => {
+        if (idx < 0 || idx >= ed.models.length || idx === activeIdx) return
+        activeIdx = idx
+        // Rebuild bone picker for the new skeleton
+        bonePicker?.dispose?.()
+        bonePicker = createBonePicker(scene, active().skeleton, ACTIVE_BONES)
+        bonePicker.onSelect((boneName) => selectBone(boneName))
+        if (cameraMode === 'editor') bonePicker.setActive(true)
+        selectBone(null)
+        // Undo history is per-model; clear on switch
+        undoStack.length = 0
+        redoStack.length = 0
+      },
       getInitialAnchor: () => ({
         id: '__initial__',
         name: 'Initial position',
-        rotations: { ...ed.restPose },
+        rotations: { ...active().restPose },
         system: true as const,
       }),
     }

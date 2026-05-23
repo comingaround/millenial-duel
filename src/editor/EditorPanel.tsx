@@ -62,6 +62,14 @@ export default function EditorPanel() {
   const [selectedBone, setSelectedBone] = useState<string | null>(null)
   const [poses, setPoses] = useState<Pose[]>([])
   const [anchors, setAnchors] = useState<Anchor[]>([])
+  // Multi-model selector — both knights are on screen at all times; the
+  // active index decides which one bone-control / anim-preview affects.
+  const [models, setModels] = useState<string[]>([])
+  const [activeModel, setActiveModelState] = useState(0)
+  const setActiveModel = (idx: number) => {
+    setActiveModelState(idx)
+    ;(window as any).__editor?.setActiveModel?.(idx)
+  }
   const [animations, setAnimations] = useState<AnimDef[]>([])
   const [draft, setDraft] = useState<DraftAnim | null>(null)
   const [hydrated, setHydrated] = useState(false)
@@ -103,6 +111,11 @@ export default function EditorPanel() {
       if (!ed) return false
       unsub = ed.addBoneSelectListener((name) => setSelectedBone(name))
       setSelectedBone(ed.getSelectedBone())
+      // Pull initial models list + active index
+      const mNames = (ed as any).getModels?.() as string[] | undefined
+      if (mNames && mNames.length) setModels(mNames)
+      const aIdx = (ed as any).getActiveModelIndex?.() as number | undefined
+      if (typeof aIdx === 'number') setActiveModelState(aIdx)
       setEditorReady(true)
       return true
     }
@@ -382,6 +395,23 @@ export default function EditorPanel() {
     <div style={panelStyle}>
       <h3 style={titleStyle}>EDITOR</h3>
 
+      {/* Models — both knights are always on screen; click to choose which
+          one bone-control / animation preview operates on. */}
+      <Section label={`Models (${models.length})`}>
+        {models.length === 0 ? (
+          <Empty text="(loading…)" />
+        ) : (
+          models.map((name, idx) => (
+            <ModelRow
+              key={idx}
+              name={name}
+              active={activeModel === idx}
+              onClick={() => setActiveModel(idx)}
+            />
+          ))
+        )}
+      </Section>
+
       {/* Save buttons */}
       <div style={btnRowStyle}>
         <button style={btnPrimary} onClick={onSavePose}>Save Pose</button>
@@ -608,6 +638,28 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 
 function Empty({ text }: { text: string }) {
   return <div style={emptyStyle}>{text}</div>
+}
+
+function ModelRow({
+  name, active, onClick,
+}: {
+  name: string
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <div
+      style={{
+        ...poseRowStyle,
+        ...(active ? { background: 'rgba(95, 130, 200, 0.45)', color: '#fff' } : {}),
+        cursor: 'pointer',
+      }}
+      onClick={onClick}
+    >
+      <span style={{ flex: 1, fontSize: 12 }}>{name}</span>
+      {active ? <span style={{ fontSize: 10, opacity: 0.7 }}>✓</span> : null}
+    </div>
+  )
 }
 
 function DispInput({

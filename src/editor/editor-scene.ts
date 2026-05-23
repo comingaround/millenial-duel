@@ -11,8 +11,13 @@ import {
 } from '@babylonjs/core'
 import { POSITION_BONES } from './pose-store'
 
-// Standalone editor knight, isolated from the duel scene.
-const POSITION = new Vector3(50, 0, 0)
+// Editor knight area — two instances facing each other for combat practice.
+// Model 1 sits at -X side facing +X; Model 2 at +X side facing -X.
+// The editor camera target is between them (50, 1, 0).
+const MODEL1_POSITION = new Vector3(49.0, 0, 0)
+const MODEL2_POSITION = new Vector3(51.0, 0, 0)
+const MODEL1_YROT = -Math.PI / 2     // face +X (toward Model 2)
+const MODEL2_YROT = Math.PI / 2      // face -X (toward Model 1)
 
 // Active bones: combat-relevant subset of the rig.
 //   Torso/head — Hips (whole-body lean), Spine, Chest, Neck, Head
@@ -21,13 +26,11 @@ const POSITION = new Vector3(50, 0, 0)
 //   Legs       — Upper Leg / Lower Leg / Foot
 // Skipped: Fingers, Thumbs, Hand Hold (weapon attach), Toes, IK helpers.
 export const ACTIVE_BONES: readonly string[] = [
-  // torso + head (5)
   'Hips',
   'Spine',
   'Chest',
   'Neck',
   'Head',
-  // arms (8 incl. clavicles)
   'Shoulder.L',
   'Shoulder.R',
   'Upper Arm.L',
@@ -36,7 +39,6 @@ export const ACTIVE_BONES: readonly string[] = [
   'Lower Arm.R',
   'Hand.L',
   'Hand.R',
-  // legs (6)
   'Upper Leg.L',
   'Upper Leg.R',
   'Lower Leg.L',
@@ -45,7 +47,6 @@ export const ACTIVE_BONES: readonly string[] = [
   'Foot.R',
 ]
 
-// Same color palette as the rest of the project for visual consistency.
 const MAT_COLORS: Record<string, Color3> = {
   'Blade':            new Color3(0.78, 0.80, 0.86),
   'Blade highlight':  new Color3(0.94, 0.95, 0.98),
@@ -65,116 +66,143 @@ const MAT_COLORS: Record<string, Color3> = {
 }
 const FALLBACK = new Color3(0.55, 0.55, 0.55)
 
-export type EditorSceneApi = {
+// One knight instance — has its own root, skeleton(s), rest data, and meshes.
+// Anchors / animations are applied per-instance via the engine's active-model
+// selector. Materials are shared via a single matCache passed in (so both
+// instances render with the same colors and the Style panel affects both).
+export type ModelInstance = {
+  name: string
   root: AbstractMesh
-  skeleton: Skeleton          // primary skeleton (for bone lookup)
-  skeletons: Skeleton[]       // all 8 (need prepare() on each)
-  allBoneNames: string[]      // full list for the panel
+  skeleton: Skeleton           // primary skeleton for bone lookups
+  skeletons: Skeleton[]        // all 8 (need prepare() each frame)
+  glbMeshes: AbstractMesh[]
   restPose: Record<string, [number, number, number, number]>
   restPositions: Record<string, [number, number, number]>
-  // World-space rest positions for POSITION_BONES — used by the editor's
-  // readout to show world-space deltas instead of confusing local-parent ones.
   restWorldPositions: Record<string, [number, number, number]>
-  position: Vector3
-  animationGroups: any[]      // baked anims from the GLB
+  position: Vector3            // initial world position (for Reset)
 }
 
-export function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> {
-  return SceneLoader.ImportMeshAsync('', '/models/', 'knight.glb', scene)
-    .then((result) => {
-      const root =
-        result.meshes.find((m) => m.name === '__root__') ?? result.meshes[0]
-      root.name = 'editor_knight'
-      root.position = POSITION.clone()
-      root.scaling = root.scaling.scale(1.2)
+export type EditorSceneApi = {
+  models: ModelInstance[]      // [Model 1, Model 2]
+  allBoneNames: string[]       // shared (same rig)
+  animationGroups: any[]       // baked anims from the first GLB load
+}
 
-      // Material override + make all meshes non-pickable so only the
-      // bone-picker spheres receive clicks.
-      const matCache = new Map<string, StandardMaterial>()
-      for (const m of result.meshes) {
-        m.isPickable = false
-        if (!(m instanceof Mesh) || m.getTotalVertices() === 0) continue
-        if (!m.material) continue
-        const matName = m.material.name
-        let mat = matCache.get(matName)
-        if (!mat) {
-          mat = new StandardMaterial(`editor_${matName}`, scene)
-          mat.diffuseColor = MAT_COLORS[matName] ?? FALLBACK
-          mat.specularColor = new Color3(0.10, 0.10, 0.12)
-          mat.ambientColor = (MAT_COLORS[matName] ?? FALLBACK).scale(0.5)
-          matCache.set(matName, mat)
-        }
-        m.material = mat
+async function loadKnightInstance(
+  scene: Scene,
+  matCache: Map<string, StandardMaterial>,
+  name: string,
+  position: Vector3,
+  yRotation: number,
+): Promise<ModelInstance> {
+  const result = await SceneLoader.ImportMeshAsync('', '/models/', 'knight.glb', scene)
+  const root =
+    result.meshes.find((m) => m.name === '__root__') ?? result.meshes[0]
+  root.name = name
+  root.position = position.clone()
+  root.scaling = root.scaling.scale(1.2)
+  root.rotation = new Vector3(0, yRotation, 0)
+
+  // Materials — shared across all instances via matCache
+  for (const m of result.meshes) {
+    m.isPickable = false
+    if (!(m instanceof Mesh) || m.getTotalVertices() === 0) continue
+    if (!m.material) continue
+    const matName = m.material.name
+    let mat = matCache.get(matName)
+    if (!mat) {
+      mat = new StandardMaterial(`editor_${matName}`, scene)
+      mat.diffuseColor = MAT_COLORS[matName] ?? FALLBACK
+      mat.specularColor = new Color3(0.10, 0.10, 0.12)
+      mat.ambientColor = (MAT_COLORS[matName] ?? FALLBACK).scale(0.5)
+      mat.backFaceCulling = false
+      matCache.set(matName, mat)
+    }
+    m.material = mat
+  }
+
+  result.animationGroups.forEach((g) => g.stop())
+
+  // Find all skeletons under THIS instance's root (sharing TransformNodes).
+  const allSkeletons = new Set<Skeleton>()
+  scene.meshes.forEach((m) => {
+    if (!m.skeleton) return
+    let p: any = m
+    while (p) {
+      if (p === root) {
+        allSkeletons.add(m.skeleton)
+        break
       }
+      p = p.parent
+    }
+  })
+  const skeletons = Array.from(allSkeletons)
+  const skeleton = result.skeletons[0]
 
-      // Editor knight stays in rest pose — but keep the baked anim groups
-      // around so users can import them as anchors via the editor UI.
-      result.animationGroups.forEach((g) => g.stop())
+  // Per-instance per-frame prepare() for multi-skin matrix refresh
+  scene.onBeforeRenderObservable.add(() => {
+    for (const s of skeletons) s.prepare()
+  })
 
-      // The Knight GLB has 8 skeletons sharing TransformNodes (one per mesh
-      // group). All need prepare() every frame for bone edits to refresh
-      // the skinning matrices reliably.
-      const allSkeletons = new Set<Skeleton>()
-      scene.meshes.forEach((m) => {
-        if (!m.skeleton) return
-        let p: any = m
-        while (p) {
-          if (p === root) {
-            allSkeletons.add(m.skeleton)
-            break
-          }
-          p = p.parent
-        }
-      })
-      const skeletons = Array.from(allSkeletons)
-      const skeleton = result.skeletons[0]
+  // Capture rest pose for this instance
+  const restPose: Record<string, [number, number, number, number]> = {}
+  const restPositions: Record<string, [number, number, number]> = {}
+  const restWorldPositions: Record<string, [number, number, number]> = {}
+  root.computeWorldMatrix(true)
+  for (const bone of skeleton.bones) {
+    const node = bone._linkedTransformNode
+    if (!node) continue
+    node.rotationQuaternion =
+      node.rotationQuaternion ?? node.rotation.toQuaternion()
+    const q = node.rotationQuaternion
+    restPose[bone.name] = [q.x, q.y, q.z, q.w]
+    if (POSITION_BONES.includes(bone.name)) {
+      const p = node.position
+      restPositions[bone.name] = [p.x, p.y, p.z]
+      node.computeWorldMatrix(true)
+      const wp = node.getAbsolutePosition()
+      restWorldPositions[bone.name] = [wp.x, wp.y, wp.z]
+    }
+  }
 
-      scene.onBeforeRenderObservable.add(() => {
-        for (const s of skeletons) s.prepare()
-      })
+  return {
+    name,
+    root,
+    skeleton,
+    skeletons,
+    glbMeshes: result.meshes,
+    restPose,
+    restPositions,
+    restWorldPositions,
+    position: position.clone(),
+  }
+}
 
-      const allBoneNames = skeleton.bones.map((b) => b.name)
+export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> {
+  try {
+    // Shared material cache — both knights use the same StandardMaterial
+    // instances so Style-panel recolors affect both at once and we don't
+    // waste GPU on duplicates.
+    const matCache = new Map<string, StandardMaterial>()
 
-      // Capture rest pose (rotations for every bone, plus local position
-      // for bones in POSITION_BONES — Hips only — so Reset can restore both).
-      const restPose: Record<string, [number, number, number, number]> = {}
-      const restPositions: Record<string, [number, number, number]> = {}
-      const restWorldPositions: Record<string, [number, number, number]> = {}
-      // Make sure world matrices are up-to-date before reading absolute pos.
-      root.computeWorldMatrix(true)
-      for (const bone of skeleton.bones) {
-        const node = bone._linkedTransformNode
-        if (!node) continue
-        node.rotationQuaternion =
-          node.rotationQuaternion ?? node.rotation.toQuaternion()
-        const q = node.rotationQuaternion
-        restPose[bone.name] = [q.x, q.y, q.z, q.w]
-        if (POSITION_BONES.includes(bone.name)) {
-          const p = node.position
-          restPositions[bone.name] = [p.x, p.y, p.z]
-          node.computeWorldMatrix(true)
-          const wp = node.getAbsolutePosition()
-          restWorldPositions[bone.name] = [wp.x, wp.y, wp.z]
-        }
-      }
+    const m1 = await loadKnightInstance(scene, matCache, 'Model 1', MODEL1_POSITION, MODEL1_YROT)
+    const m2 = await loadKnightInstance(scene, matCache, 'Model 2', MODEL2_POSITION, MODEL2_YROT)
 
-      console.log(
-        `[editor] knight loaded — ${skeleton.bones.length} bones, ${skeletons.length} skins`,
-      )
-      return {
-        root,
-        skeleton,
-        skeletons,
-        allBoneNames,
-        restPose,
-        restPositions,
-        restWorldPositions,
-        position: POSITION.clone(),
-        animationGroups: result.animationGroups,
-      }
-    })
-    .catch((err) => {
-      console.error('[editor] load failed', err)
-      return null
-    })
+    // The first load also brings in animationGroups (baked anims). Both
+    // instances share these (they're scene-global) but they only target the
+    // first instance's bones. We keep them for the Import-Baked feature.
+    // To re-discover them, query scene.animationGroups.
+    const animationGroups = scene.animationGroups.slice()
+
+    const allBoneNames = m1.skeleton.bones.map((b) => b.name)
+
+    console.log(
+      `[editor] loaded ${2} knight instances — ${m1.skeleton.bones.length} bones each`,
+    )
+
+    return { models: [m1, m2], allBoneNames, animationGroups }
+  } catch (err) {
+    console.error('[editor] load failed', err)
+    return null
+  }
 }
