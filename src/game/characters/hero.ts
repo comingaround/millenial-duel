@@ -157,8 +157,8 @@ export function createHero(scene: Scene): Promise<HeroApi | null> {
 
       const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
         combatIdle?.pause()
-        playAnimation(scene, skeleton, keyframes)
-        // After approximate duration, resume idle
+        // Pass root so per-keyframe displacement physically moves the hero.
+        playAnimation(scene, skeleton, keyframes, root)
         const lastTime = keyframes[keyframes.length - 1]?.time ?? 0
         setTimeout(() => combatIdle?.play(true), Math.max(50, lastTime * 1000 + 200))
       }

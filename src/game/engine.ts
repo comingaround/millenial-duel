@@ -393,6 +393,9 @@ export function createEngine(
           rotations: ed.restPose,
           positions: ed.restPositions,
         })
+        // Reset editor knight's world position too — body position readout
+        // will go back to 0/0/0 since it shows offset from this base.
+        ed.root.position.copyFrom(ed.position)
         selectBone(null)
       },
       selectBone,
@@ -410,7 +413,20 @@ export function createEngine(
       },
       playAnimation: (keyframes: AnimationKeyframe[]) => {
         stopActiveAnimation()
-        activeAnimatables = playAnimation(scene, ed.skeleton, keyframes)
+        // Pass editor knight's root → keyframe displacement values physically
+        // translate the editor knight during preview, so the author sees the
+        // actual character motion (not just bones moving in place).
+        activeAnimatables = playAnimation(scene, ed.skeleton, keyframes, ed.root)
+      },
+      // Live body-position readout: editor knight's current world position
+      // minus its starting world position (so it reads 0/0/0 when reset).
+      getBodyPosition: () => {
+        ed.root.computeWorldMatrix(true)
+        return {
+          x: ed.root.position.x - ed.position.x,
+          y: ed.root.position.y - ed.position.y,
+          z: ed.root.position.z - ed.position.z,
+        }
       },
       stopAnimation: () => stopActiveAnimation(),
       listBakedAnimations: () =>

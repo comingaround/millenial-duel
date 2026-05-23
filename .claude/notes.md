@@ -6,11 +6,16 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 
 - ✅ Duel scene (hero + opponent + 2 baked-key animations) — same as before
 - ✅ Custom **pose/animation editor** at scene `(50, 0, 0)` — separate knight rig used purely as a posing puppet
-- ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips position stepper (X/Y/Z, ±/scroll-wheel, 3mm step, displayed in cm)**, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, Initial Position anchor (auto, undeletable), rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
+- ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips Y stepper (CROUCH only — X/Z removed since locomotion moved to per-keyframe displacement)**, editable typed input + scroll-wheel + ± buttons, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, Initial Position anchor (auto, undeletable), rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
+- ✅ **Locomotion = per-keyframe displacement** (NOT per-anim metadata, NOT Hips-X/Z promotion — both tried and rejected). Each keyframe in the animation builder has `pos X[ ] Y[ ] Z[ ]` cm inputs = where the body is at this keyframe relative to anim-start position. At playback, character's `root.position` is animated to those positions, transformed through root's rotation (so +Z = "character's forward"). Composes across anims: anim 2 starts from wherever anim 1 ended.
+- ✅ **Editor preview moves the editor knight** through the world (not just bones-in-place) so author sees the actual character motion. Reset snaps editor knight back to its starting world position.
+- ✅ **Always-visible BODY POSITION readout** in right panel (top, both Bones/Style modes) — live world-space cm coords relative to starting position. Updates every frame.
+- ✅ **Style tab** (right panel toggle) — material recolor with native color pickers per material slot (Blade, Wood, Emblem, Metal, etc.). Editor knight only. Reset to default colors button. Bone spheres hidden in Style mode.
 - ✅ **Undo + Redo** with keyboard shortcuts (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z). UI: undo+redo in one row, full-width red Reset button below.
-- ✅ Persistence: `public/custom-animations/library.json` via dev-only Vite middleware (`vite-plugins/animation-saver.ts`). Anchors carry both `rotations` and (Hips-only) `positions` — round-trips through the JSON automatically.
-- ✅ Key dispatch: engine.ts checks `window.__customAnims` first → falls back to default Q/U/Space/Enter. Ctrl+Z/Y guarded before custom-anim lookup so a user-bound 'z'/'y' doesn't swallow them.
-- ⏳ No HP / damage / AI / HUD yet
+- ✅ Persistence: `public/custom-animations/library.json` via dev-only Vite middleware (`vite-plugins/animation-saver.ts`). Anchors carry `rotations` + (Hips-only) `positions`; animation keyframes carry `displacement` — all round-trip through the JSON automatically.
+- ✅ Key dispatch: engine.ts checks `window.__customAnims` first → falls back to default Q/U/Space/Enter. Ctrl+Z/Y guarded before custom-anim lookup so a user-bound 'z'/'y' doesn't swallow them. Camera-mode `<select>` blurs after change so type-ahead ('e'→Editor) doesn't swallow keys.
+- ✅ Hide hair on hero + opponent (prefix-match on mesh stem). Backface culling disabled on knight materials so mirrored geometry (right shoe, chestplate back) renders.
+- ⏳ No HP / damage / AI / HUD yet. WASD free-roam not wired (next session).
 
 ## Stack
 
@@ -230,26 +235,47 @@ scene.onBeforeRenderObservable.add(() => {
 
 - Bone tree on top, categorized by Torso / Left Arm / Right Arm / Left Leg / Right Leg / IK Helpers via `categorize()` function
 - Middle (ROTATE): 3 vertical 90×90 sphere knobs (X red, Y green, Z blue) — drag horizontally to rotate, sensitivity 0.008 rad/pixel. Each knob shows current Euler degree readout. `userSelect: 'none'` on panel + labels so dragging knobs doesn't select text. Selecting any bone enables them.
-- Bottom (TRANSLATE) — **only visible when Hips is selected** (gated by `__editor.hasPositionControl(name)`): 3 stacked `Stepper` rows for X/Y/Z. Layout: `[label] [−] [value cm] [+]` with a colored left bar per axis. Click ± steps by `POS_STEP_M = 0.003` (3 mm). **Scroll-wheel on hover** also steps (deltaY < 0 → +, > 0 → −) via a non-passive `wheel` listener (React's onWheel is passive by default — can't preventDefault). Value shown in cm with 1 decimal (e.g. `95.3 cm`) for clean 0.3 increments. Hint: `Y = crouch · X = side · Z = fwd/back`.
+- Bottom (CROUCH) — **only visible when Hips is selected** (gated by `__editor.hasPositionControl(name)`): a single `Stepper` row for Y only (X/Z removed — locomotion lives in per-keyframe displacement now, not Hips). Layout: `[label] [−] [editable input] [cm] [+]` with a colored left bar. Click ± steps by `POS_STEP_M = 0.01` (1cm). **Scroll-wheel on hover** also steps (deltaY < 0 → +, > 0 → −) via a non-passive `wheel` listener (React's onWheel is passive by default — can't preventDefault). **Typed input**: click into the value, type a number, press Enter to jump directly. Hint: `down = crouch · up = rise`.
+- Stepper translates in WORLD space via `node.translate(axis, delta, Space.WORLD)` — the bone's parent-local axes are rotated by Blender→Babylon conversion, so direct `position.xyz` editing produces axis-mixing. WORLD-space translation makes X/Y/Z match screen axes. The readout also reports world-space delta from `restWorldPositions` (cached on load via `computeWorldMatrix(true)` walk).
 - **Undo coalescing on Stepper**: rapid clicks or wheel notches within `UNDO_BURST_MS = 300` collapse into ONE undo entry. Implementation: `lastStepTime` ref + `beginActionMaybe()` checks elapsed time before calling `pushUndo`. Avoids filling the 40-slot undo stack on a single scroll gesture.
 - Below all controls: Undo + Redo side-by-side; Reset (full-width, red-tinted) below.
 
-### Hips translation (crouch / lean / weight shift)
+### Hips translation (crouch only — body shift)
 
-The editor lets a small allow-list of bones carry **local position** alongside rotation. Currently just Hips. Lowering Hips Y crouches the whole body without sliding the character through the world (feet stay planted via the leg chain).
+Hips Y is the only translation axis exposed in the editor UI. Used for crouch / body height — body sinks, feet stay (visually) attached. The X/Z steppers were removed; locomotion now lives in **per-keyframe displacement** (see next section). Don't put X/Z back without a real reason — it conflicts with the displacement system.
 
-- `POSITION_BONES = ['Hips']` lives in `src/editor/pose-store.ts` and is the single source of truth.
-- `snapshotPose` / `applyPose` now both capture/restore an optional `positions: Record<string, [x,y,z]>` alongside `rotations`.
-- `editor-scene.ts` extends `EditorSceneApi` with `restPositions` so Reset restores the standing height.
+- `POSITION_BONES = ['Hips']` in `src/editor/pose-store.ts` is the allow-list for translatable bones.
+- `snapshotPose` / `applyPose` capture/restore an optional `positions: Record<string, [x,y,z]>` alongside `rotations`. Only Hips Y is meant to be non-rest in practice.
+- `editor-scene.ts` extends `EditorSceneApi` with `restPositions` (local-parent) and `restWorldPositions` (world) so Reset restores both, and the readout can show world deltas.
 - `engine.ts` exposes:
-  - `translateSelectedBone(axis, deltaMeters)` — no-ops on non-`POSITION_BONES` bones so limbs can't be stretched by an accidental drag.
-  - `getSelectedBonePosition()` — local position of selected bone in meters (or `null` if no position control).
-  - `hasPositionControl(boneName)` — for the UI to decide whether to render TRANSLATE.
-- Undo/redo `Snap` type now `{ rotations, positions }`; capture+restore go through `snapshotPose`/`applyPose`.
-- `animation-player.ts` builds a second Babylon track per position-carrying bone: `position`, `ANIMATIONTYPE_VECTOR3`, same FPS, same implicit-frame-0 = current state rule. Plays in sync with the quaternion tracks.
-- Persistence: anchors saved/loaded with `positions` blob automatically. The `Anchor` / `Pose` types in `EditorPanel.tsx` carry it as optional.
+  - `translateSelectedBone(axis, deltaMeters)` — Space.WORLD via `node.translate`. No-ops on non-`POSITION_BONES` bones.
+  - `getSelectedBonePosition()` — world-space delta from rest world position. `null` if no position control.
+  - `hasPositionControl(boneName)` — for the UI to decide whether to render the CROUCH section.
+- Undo/redo `Snap` type is `{ rotations, positions }`; capture+restore go through `snapshotPose`/`applyPose`.
+- `animation-player.ts` builds a position track on the Hips bone from anchor `positions`. Plays in sync with rotation tracks.
 
-**Why scope to just Hips:** lets the schema permit other bones later (head bobble, hand offset etc.) without rewriting everything, while preventing the user from accidentally stretching forearms by dragging a non-Hips bone's position. A bone-by-bone allow-list is the conservative gate.
+### Locomotion via per-keyframe displacement (the actual character-movement system)
+
+Each animation keyframe carries an optional `displacement: [x, y, z]` (metres) that defines **where the character's body is at this keyframe, relative to where the anim started**. At playback, the character's `root.position` is animated through those displacements, transformed by the root's rotation so the values are character-relative (Z = "the character's forward," not world-Z).
+
+**Why this approach won (after rejecting two others):**
+- ❌ **Tried first**: per-anim `forwardStep` scalar metadata — rejected by user as "two unrelated motions glued together" (animation visually swings in place, gameplay drags the body forward — disconnected).
+- ❌ **Tried second**: Hips X/Z translation auto-promoted to root.position at playback — rejected because the editor preview showed body leaning while the gameplay showed full-character translation (authoring/playback visual mismatch was confusing).
+- ✅ **Settled**: explicit per-keyframe XYZ inputs in the animation builder. Author sees exactly what they're committing to, editor preview physically moves the knight (matches gameplay 1:1), composes across anims (anim 2 picks up wherever anim 1 ended).
+
+**Implementation:**
+- `AnimKeyframe` type in `EditorPanel.tsx` has `displacement?: [number, number, number]` (metres).
+- Each keyframe row in the animation builder shows a second sub-row: `pos X[ ] Y[ ] Z[ ] cm`. Inputs are in cm; converted to metres internally.
+- `animation-player.ts playAnimation(scene, skeleton, keyframes, locomotionRoot?)` — if `locomotionRoot` provided and any keyframe has non-zero displacement, builds a `root.position` Vector3 track from the displacement values. Uses `Vector3.TransformNormal(localDelta, root.getWorldMatrix())` so the local displacement vector gets the root's rotation applied (character-relative motion).
+- Editor preview path (`__editor.playAnimation`) passes `ed.root` so the editor knight physically moves during preview.
+- Hero/opponent `playCustomAnimation` pass their `root` so the duel-scene characters move when bound keys fire.
+- Persistence: `displacement` rides through `library.json` automatically (sparse — only saved when non-zero/explicit).
+
+**Body-position readout (right panel, always visible):**
+- Top of `BoneControls.tsx`, sits below the Bones/Style tabs, shows `X N · Y N · Z N · cm`.
+- Polled every frame via `__editor.getBodyPosition()` — returns editor knight's current world position minus its starting world position (`ed.position`).
+- Updates live as preview-anims play. Reads 0/0/0 at rest. Persists across multiple anim plays (because root.position is cumulative — anim 2 starts wherever anim 1 ended, and the readout reflects that).
+- Reset snaps editor knight's root back to `ed.position` and the readout returns to 0/0/0.
 
 ### Animation builder + player
 
@@ -330,7 +356,7 @@ The Initial Position anchor used to be stored in state and inserted by both an a
 - `window.__bjs` = `{engine, scene, camera, fpCam, editorCam, setCameraMode}`
 - `window.__hero` = `{playStrike, playBlock, getHeadNode, playCustomAnimation}`
 - `window.__opponent` = `{playSlash, playBlock, playCustomAnimation}`
-- `window.__editor` = `{snapshot, apply, reset, selectBone, getSelectedBone, addBoneSelectListener, rotateSelectedBone, translateSelectedBone, getSelectedBoneEuler, getSelectedBonePosition, hasPositionControl, playAnimation, stopAnimation, pushUndo, undo, redo, canUndo, canRedo, getInitialAnchor, listBakedAnimations, importBakedAnimation, ...}`
+- `window.__editor` = `{snapshot, apply, reset, selectBone, getSelectedBone, addBoneSelectListener, rotateSelectedBone, translateSelectedBone, getSelectedBoneEuler, getSelectedBonePosition, hasPositionControl, getBodyPosition, setBonePickerActive, getEditorMaterials, setEditorMaterialColor, resetEditorMaterials, playAnimation, stopAnimation, pushUndo, undo, redo, canUndo, canRedo, getInitialAnchor, listBakedAnimations, importBakedAnimation, ...}`
 - `window.__customAnims` = resolved custom animations `{name, heroKey, oppKey, resolved: [{anchor:{rotations, positions?}, time}]}` — `positions` flows through for Hips translation playback
 
 ## Asset pipeline (FBX → GLB)
@@ -398,22 +424,23 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 
 ✅ **Working:**
 - Scene with sky, sun, clouds, grass, trees, buildings
-- Hero + opponent both rendered with the same knight model
-- Hero in FP view (head hidden, body visible from 3rd-person)
+- Hero + opponent both rendered with the same knight model (helmets visible on opp, hidden on hero for FP; hair hidden on both; backface culling off so mirrored geometry renders)
 - Three cameras + UI toggle (Free Roam / Locked / Editor)
 - Q/Space (hero) and U/Enter (opponent) → strike + block animations
 - Combat_idle looping on both, pauses cleanly when other animations play
 - Arrow-key camera movement (no page scroll)
-- **In-browser pose/animation editor** with bone-pick, knob rotation, Hips position stepper (X/Y/Z, scroll-wheel, 3mm step, cm readout), anchors, animation builder w/ in-place Edit, undo+redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, with burst-coalescing for stepper), library persistence (rotations + positions), import-baked, per-character key bindings
+- **In-browser pose/animation editor** with bone-pick, knob rotation, Hips Y stepper (CROUCH only, world-space, editable input + scroll + ± buttons), anchors, animation builder w/ in-place Edit, per-keyframe X/Y/Z displacement inputs for locomotion, BODY POSITION live readout in right panel, editor preview that physically moves the knight, undo+redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, with burst-coalescing for stepper), library persistence (rotations + positions + displacement), import-baked, per-character key bindings
+- **Style tab** (right panel) — recolor every material slot (Blade, Wood, Emblem, Metal, etc.) on editor knight, Reset to defaults
 
 ⏳ **Pending:**
 - HP system + damage timing
 - Block-window mechanic (cancel damage if blocked in time)
 - Additional strikes (left/right) — author via editor; one slash mirror would also work
-- Dodges (left/right) — author via editor
+- Dodges (left/right) — author via editor (use displacement for sidestep distance)
 - Hit-react / block-react / death animations — author via editor
 - NPC AI for opponent
 - HUD: HP bars, key hints, attack-warning corners
+- WASD free-roam locomotion in FP mode — input-driven `root.position` translation + walk-cycle anim on top (decoupled from the per-keyframe-displacement system, which is for discrete moves)
 - Mouse-look for hero in Locked camera (currently click-drag)
 - Production-safe persistence (current `/api/animations` is dev-only Vite middleware)
 
@@ -432,6 +459,13 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 11. **Burst-coalescing prevents undo-stack DoS.** A 30-notch wheel scroll = ONE undo entry, not 30. Implementation: only `pushUndo` when the previous step was >300ms ago (`UNDO_BURST_MS`). Same trick would apply to keyboard-held auto-repeat.
 12. **Edit-in-place via the same draft form, not a separate "edit" mode.** When user clicks ✎ on an animation, load name + keyframes into the existing builder UI with an `editingId` flag. Save commits in place (no duplicate), Cancel discards. One UI surface, two modes. Header text flips `New Animation` ↔ `Edit Animation`.
 13. **Display units ≠ underlying units.** Hips translation stepper stores meters internally (so Babylon math is consistent) but displays centimeters (so the readout is human-scale). The step size and display formatting are independent knobs — `step={0.003}` (m) + `value={pos.y * 100}` + `unit="cm"` + `precision={1}` gave a clean 0.3-cm-per-click feel without changing any engine code.
+14. **Blender→Babylon axis convention bites bone-position editing.** Bone-local axes are rotated by the GLB import (Blender Y-up vs Babylon Y-up), so editing `node.position.x/y/z` directly produces axis-mixing (e.g. user types "Z" but body moves up+sideways). Fix: use `node.translate(axis, dist, Space.WORLD)` so Babylon does the parent-inverse-transform math. Readout should also be in world-space (cache rest world position via `computeWorldMatrix(true)` + `getAbsolutePosition`, show current-minus-rest).
+15. **For character locomotion, authoring per-keyframe IS the right level.** Tried two simpler models first — per-anim `forwardStep` scalar (rejected: "two unrelated motions glued together") and Hips X/Z auto-promotion to root (rejected: editor preview leaned, gameplay translated, visual mismatch). Settling on per-keyframe displacement (`pos X[ ] Y[ ] Z[ ]` cm inputs in the keyframe row) won because the author can see exactly what each keyframe commits to and the editor preview shows the same physical motion as gameplay. Composes across anims naturally (anim 2's displacements are relative to wherever anim 1 ended).
+16. **`Vector3.TransformNormal(localDelta, root.getWorldMatrix())` is the right helper for "this local direction, applied via the root's rotation."** Used to convert per-keyframe local displacement (X=character-right, Z=character-forward) into world-space root.position deltas. So a "+0.20 Z step" authored on the editor knight becomes "+20cm in character-forward direction" on a rotated hero/opp automatically.
+17. **Always-visible state readouts beat per-feature readouts.** Body position display in right panel (not gated by selection, always shown) lets the user see character location independent of what they're doing. Polls every frame via raf — cheap. Important for chained animations where each anim starts from the previous one's endpoint.
+18. **Native HTML `<select>` type-ahead steals keystrokes.** Pressing 'e' while a CameraToggle `<select>` had focus jumped to "Editor" option silently. Fix: `e.target.blur()` after onChange — release focus, keystrokes flow to game keydown handler. Worth checking any input/select for the same issue.
+19. **Stepper UI scope creep is fine in moderation.** Started as just ± buttons. Added wheel-scroll → more useful. Added typed input for big jumps → essential. Burst-coalescing for undo → critical. Each addition was small but compounded into a nice tool. Stop when the user stops asking.
+20. **Reset semantics matter as system grows.** Originally "Reset = restore rotations." Now "Reset = restore rotations + positions + Hips Y + editor knight root position." Every persistent piece of state needs an entry in the reset path. Skip one and the user will hit it eventually.
 
 ## What we tried and rejected
 

@@ -8,7 +8,15 @@ type Anchor = {
   id: string; name: string; rotations: RotationMap; positions?: PositionMap; system?: boolean
 }
 
-type AnimKeyframe = { anchorId: string; time: number }
+// Per-keyframe body displacement from anim-start position (metres).
+// Defines world-space character locomotion alongside the bone pose. When
+// the animation plays, the character's root translates so it's at this
+// displacement at this keyframe's time.
+type AnimKeyframe = {
+  anchorId: string
+  time: number
+  displacement?: [number, number, number]
+}
 type AnimDef = {
   id: string
   name: string
@@ -151,12 +159,17 @@ export default function EditorPanel() {
         .map((kf) => {
           const an = displayedAnchors.find((x) => x.id === kf.anchorId)
           return an
-            ? { anchor: { rotations: an.rotations, positions: an.positions }, time: kf.time }
+            ? {
+                anchor: { rotations: an.rotations, positions: an.positions },
+                time: kf.time,
+                displacement: kf.displacement,
+              }
             : null
         })
         .filter((x) => x !== null) as Array<{
           anchor: { rotations: RotationMap; positions?: PositionMap }
           time: number
+          displacement?: [number, number, number]
         }>,
     }))
     ;(window as any).__customAnims = resolved
@@ -312,7 +325,11 @@ export default function EditorPanel() {
       .map((kf) => {
         const anchor = displayedAnchors.find((a) => a.id === kf.anchorId)
         return anchor
-          ? { anchor: { rotations: anchor.rotations, positions: anchor.positions }, time: kf.time }
+          ? {
+              anchor: { rotations: anchor.rotations, positions: anchor.positions },
+              time: kf.time,
+              displacement: kf.displacement,
+            }
           : null
       })
       .filter((x): x is NonNullable<typeof x> => x !== null)
@@ -422,39 +439,56 @@ export default function EditorPanel() {
           {draft.keyframes.length === 0 ? (
             <Empty text="(add anchor keyframes below)" />
           ) : (
-            draft.keyframes.map((kf, idx) => (
-              <div key={idx} style={keyframeRowStyle}>
-                <select
-                  value={kf.anchorId}
-                  onChange={(e) => onUpdateKeyframe(idx, { anchorId: e.target.value })}
-                  style={selectStyle}
-                >
-                  {displayedAnchors.map((a) => (
-                    <option
-                      key={a.id}
-                      value={a.id}
-                      style={{ background: '#1c1f24', color: '#fff' }}
+            draft.keyframes.map((kf, idx) => {
+              const disp = kf.displacement ?? [0, 0, 0]
+              const updateDisp = (axis: 0 | 1 | 2, cmValue: number) => {
+                const next: [number, number, number] = [...disp]
+                next[axis] = cmValue / 100   // cm → metres
+                onUpdateKeyframe(idx, { displacement: next })
+              }
+              return (
+                <div key={idx} style={keyframeBlockStyle}>
+                  <div style={keyframeRowStyle}>
+                    <select
+                      value={kf.anchorId}
+                      onChange={(e) => onUpdateKeyframe(idx, { anchorId: e.target.value })}
+                      style={selectStyle}
                     >
-                      {a.name}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  type="number"
-                  step={0.05}
-                  min={0}
-                  value={kf.time}
-                  onChange={(e) =>
-                    onUpdateKeyframe(idx, { time: parseFloat(e.target.value) || 0 })
-                  }
-                  style={timeInputStyle}
-                />
-                <span style={{ fontSize: 10, opacity: 0.5 }}>s</span>
-                <span style={delStyle} onClick={() => onRemoveKeyframe(idx)}>
-                  ×
-                </span>
-              </div>
-            ))
+                      {displayedAnchors.map((a) => (
+                        <option
+                          key={a.id}
+                          value={a.id}
+                          style={{ background: '#1c1f24', color: '#fff' }}
+                        >
+                          {a.name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      step={0.05}
+                      min={0}
+                      value={kf.time}
+                      onChange={(e) =>
+                        onUpdateKeyframe(idx, { time: parseFloat(e.target.value) || 0 })
+                      }
+                      style={timeInputStyle}
+                    />
+                    <span style={{ fontSize: 10, opacity: 0.5 }}>s</span>
+                    <span style={delStyle} onClick={() => onRemoveKeyframe(idx)}>
+                      ×
+                    </span>
+                  </div>
+                  <div style={dispRowStyle}>
+                    <span style={dispLabelStyle}>pos</span>
+                    <DispInput label="X" value={Math.round(disp[0] * 100)} onChange={(v) => updateDisp(0, v)} />
+                    <DispInput label="Y" value={Math.round(disp[1] * 100)} onChange={(v) => updateDisp(1, v)} />
+                    <DispInput label="Z" value={Math.round(disp[2] * 100)} onChange={(v) => updateDisp(2, v)} />
+                    <span style={{ fontSize: 9, opacity: 0.4 }}>cm</span>
+                  </div>
+                </div>
+              )
+            })
           )}
           <button style={btnGhost} onClick={onAddKeyframe}>
             + Add keyframe
@@ -574,6 +608,27 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 
 function Empty({ text }: { text: string }) {
   return <div style={emptyStyle}>{text}</div>
+}
+
+function DispInput({
+  label, value, onChange,
+}: {
+  label: string
+  value: number
+  onChange: (cmValue: number) => void
+}) {
+  return (
+    <label style={dispFieldStyle}>
+      <span style={dispAxisLabelStyle}>{label}</span>
+      <input
+        type="number"
+        step={1}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        style={dispInputBoxStyle}
+      />
+    </label>
+  )
 }
 
 function AnimRow({
@@ -929,12 +984,64 @@ const inputStyle: CSSProperties = {
   marginBottom: 4,
 }
 
+const keyframeBlockStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 2,
+  padding: '4px 6px',
+  marginBottom: 4,
+  background: 'rgba(255, 255, 255, 0.03)',
+  borderRadius: 4,
+}
+
 const keyframeRowStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 4,
-  padding: '3px 0',
   fontSize: 11,
+}
+
+const dispRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  marginLeft: 6,
+  paddingTop: 2,
+}
+
+const dispLabelStyle: CSSProperties = {
+  fontSize: 9,
+  opacity: 0.45,
+  letterSpacing: 0.5,
+  textTransform: 'uppercase',
+  width: 22,
+}
+
+const dispFieldStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 2,
+}
+
+const dispAxisLabelStyle: CSSProperties = {
+  fontSize: 9,
+  opacity: 0.55,
+  fontWeight: 600,
+  width: 8,
+  textAlign: 'center',
+}
+
+const dispInputBoxStyle: CSSProperties = {
+  width: 34,
+  background: 'rgba(255, 255, 255, 0.07)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 3,
+  padding: '2px 3px',
+  fontFamily: 'monospace',
+  fontSize: 10,
+  outline: 'none',
+  textAlign: 'right',
 }
 
 const selectStyle: CSSProperties = {

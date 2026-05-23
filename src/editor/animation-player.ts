@@ -1,9 +1,11 @@
 import {
+  AbstractMesh,
   Animatable,
   Animation,
   Quaternion,
   Scene,
   Skeleton,
+  TransformNode,
   Vector3,
 } from '@babylonjs/core'
 
@@ -15,6 +17,9 @@ export type AnchorData = {
 export type AnimationKeyframe = {
   anchor: AnchorData
   time: number   // seconds
+  // Body displacement at this keyframe, relative to the character's position
+  // at anim start. In metres, world-space relative to character's facing.
+  displacement?: [number, number, number]
 }
 
 const FPS = 30
@@ -23,12 +28,17 @@ const FPS = 30
 // per affected bone (rotationQuaternion track) and running them in sync.
 // Returns the set of active Animatables so callers can stop if needed.
 //
-// Hips Y is the only position channel meant for body-shift use (crouch).
-// Character world locomotion lives elsewhere (per-anim forwardStep + input).
+// `locomotionRoot` (optional): if provided AND any keyframe has displacement,
+// the character's root mesh is translated to follow the per-keyframe
+// displacement values (character physically moves through the world).
+// Displacement is character-local (X=right, Y=up, Z=forward) and gets
+// transformed through the root's rotation, so a "+Z step" on the editor
+// knight becomes "step in the character's facing direction" on a rotated hero.
 export function playAnimation(
   scene: Scene,
   skeleton: Skeleton,
   keyframes: AnimationKeyframe[],
+  locomotionRoot?: AbstractMesh | TransformNode,
 ): Animatable[] {
   if (keyframes.length < 1) return []
 
@@ -133,6 +143,64 @@ export function playAnimation(
     anim.setKeys(keys)
     const ani = scene.beginDirectAnimation(node, [anim], 0, totalFrames, false, 1.0)
     animatables.push(ani)
+  }
+
+  // Root locomotion track — built from per-keyframe `displacement` deltas.
+  // Each keyframe's displacement is the STEP TAKEN at that keyframe (delta),
+  // not absolute from anim start. So [20, 0, 0] means three keyframes where
+  // the character steps 20cm at the first and stays put at the next two —
+  // final position +20cm forward. We accumulate the deltas to build absolute
+  // root.position keys.
+  //
+  // Rotation-only (no scale): the root mesh has root.scaling = 1.2×, so
+  // TransformNormal(localDelta, worldMatrix) would 1.2x the input. Use the
+  // root's rotation quaternion instead so displacements aren't accidentally
+  // multiplied by scale.
+  if (locomotionRoot) {
+    const hasAnyDisplacement = cleaned.some(
+      (kf) => kf.displacement && (kf.displacement[0] !== 0 || kf.displacement[1] !== 0 || kf.displacement[2] !== 0),
+    )
+    if (hasAnyDisplacement) {
+      const startPos = locomotionRoot.position.clone()
+      // Get rotation-only quaternion (scale-free). Fallback to identity if
+      // somehow not available.
+      let rotQuat = locomotionRoot.rotationQuaternion?.clone() ?? null
+      if (!rotQuat) {
+        rotQuat = locomotionRoot.rotation
+          ? Quaternion.FromEulerVector(locomotionRoot.rotation)
+          : Quaternion.Identity()
+      }
+      const rootKeys: Array<{ frame: number; value: Vector3 }> = []
+      const cumulative = new Vector3(0, 0, 0)   // accumulates deltas in local space
+      if (!hasStart) {
+        rootKeys.push({ frame: 0, value: startPos.clone() })
+      }
+      for (const kf of cleaned) {
+        const d = kf.displacement ?? [0, 0, 0]
+        cumulative.x += d[0]
+        cumulative.y += d[1]
+        cumulative.z += d[2]
+        // Apply ONLY rotation (no scale) to convert local cumulative → world delta
+        const worldDelta = Vector3.Zero()
+        cumulative.rotateByQuaternionToRef(rotQuat, worldDelta)
+        rootKeys.push({
+          frame: Math.round(kf.time * FPS),
+          value: startPos.add(worldDelta),
+        })
+      }
+      if (rootKeys.length >= 2) {
+        const rootAnim = new Animation(
+          'editor_root_locomote',
+          'position',
+          FPS,
+          Animation.ANIMATIONTYPE_VECTOR3,
+          Animation.ANIMATIONLOOPMODE_CONSTANT,
+        )
+        rootAnim.setKeys(rootKeys)
+        const ani = scene.beginDirectAnimation(locomotionRoot, [rootAnim], 0, totalFrames, false, 1.0)
+        animatables.push(ani)
+      }
+    }
   }
 
   return animatables

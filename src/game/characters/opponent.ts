@@ -157,7 +157,8 @@ export function createOpponent(scene: Scene): Promise<OpponentApi | null> {
 
       const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
         combatIdle?.pause()
-        playAnimation(scene, skeleton, keyframes)
+        // Pass root so per-keyframe displacement physically moves the opponent.
+        playAnimation(scene, skeleton, keyframes, root)
         const lastTime = keyframes[keyframes.length - 1]?.time ?? 0
         setTimeout(() => combatIdle?.play(true), Math.max(50, lastTime * 1000 + 200))
       }

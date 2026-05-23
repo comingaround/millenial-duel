@@ -21,6 +21,7 @@ export default function BoneControls() {
   const [allBones, setAllBones] = useState<string[]>([])
   const [euler, setEuler] = useState<{ x: number; y: number; z: number } | null>(null)
   const [pos, setPos] = useState<{ x: number; y: number; z: number } | null>(null)
+  const [bodyPos, setBodyPos] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 })
   const [materials, setMaterials] = useState<EditorMaterial[]>([])
 
   useEffect(() => {
@@ -46,13 +47,16 @@ export default function BoneControls() {
     return () => unsub?.()
   }, [])
 
-  // Poll the selected bone's Euler angles + position each frame for the readout.
+  // Poll the selected bone's Euler angles + position + body world position
+  // each frame for the readout.
   useEffect(() => {
     let rafId = 0
     const tick = () => {
       const ed = (window as any).__editor
       setEuler(ed?.getSelectedBoneEuler?.() ?? null)
       setPos(ed?.getSelectedBonePosition?.() ?? null)
+      const bp = ed?.getBodyPosition?.()
+      if (bp) setBodyPos(bp)
       rafId = requestAnimationFrame(tick)
     }
     rafId = requestAnimationFrame(tick)
@@ -118,6 +122,17 @@ export default function BoneControls() {
         >
           Style
         </button>
+      </div>
+
+      {/* Always-visible BODY POSITION readout (world-space, from rest base) */}
+      <div style={bodyPosBlockStyle}>
+        <div style={bodyPosLabelStyle}>BODY POSITION</div>
+        <div style={bodyPosRowStyle}>
+          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>X</span>{(bodyPos.x * 100).toFixed(0)}</span>
+          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>Y</span>{(bodyPos.y * 100).toFixed(0)}</span>
+          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>Z</span>{(bodyPos.z * 100).toFixed(0)}</span>
+          <span style={{ fontSize: 9, opacity: 0.4, marginLeft: 2 }}>cm</span>
+        </div>
       </div>
 
       {panelMode === 'style' ? (
@@ -561,6 +576,43 @@ const dividerStyle: CSSProperties = {
   height: 1,
   background: 'rgba(255,255,255,0.08)',
   margin: '14px 0 12px 0',
+}
+
+const bodyPosBlockStyle: CSSProperties = {
+  padding: '6px 8px',
+  marginBottom: 10,
+  background: 'rgba(255, 255, 255, 0.04)',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  borderRadius: 4,
+}
+
+const bodyPosLabelStyle: CSSProperties = {
+  fontSize: 9,
+  letterSpacing: 1,
+  textTransform: 'uppercase',
+  opacity: 0.55,
+  marginBottom: 4,
+  fontWeight: 600,
+}
+
+const bodyPosRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  fontFamily: 'monospace',
+  fontSize: 12,
+}
+
+const bodyPosCellStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 3,
+}
+
+const bodyPosAxisStyle: CSSProperties = {
+  fontSize: 10,
+  opacity: 0.55,
+  fontWeight: 700,
 }
 
 const tabsStyle: CSSProperties = {
