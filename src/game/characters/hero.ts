@@ -8,6 +8,7 @@ import {
   Vector3,
 } from '@babylonjs/core'
 import { playAnimation, AnimationKeyframe } from '../../editor/animation-player'
+import { applyPose } from '../../editor/pose-store'
 
 // Hero stands 3m behind the camera-default-stance. Faces +Z toward opponent.
 const POSITION = new Vector3(0, 0, -8)
@@ -99,8 +100,17 @@ export function createHero(scene: Scene): Promise<HeroApi | null> {
         `[hero] knight loaded — ${result.meshes.length} meshes`,
       )
 
-      const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
+      const playCustomAnimation = (
+        keyframes: AnimationKeyframe[],
+        initialPose?: {
+          rotations: Record<string, [number, number, number, number]>
+          positions?: Record<string, [number, number, number]>
+        },
+      ) => {
         combatIdle?.pause()
+        // Snap to the animation's starting pose so playback always begins
+        // from a known state regardless of what the model was doing before.
+        if (initialPose) applyPose(skeleton, initialPose)
         // Pass root so per-keyframe displacement physically moves the hero.
         playAnimation(scene, skeleton, keyframes, root)
         const lastTime = keyframes[keyframes.length - 1]?.time ?? 0
@@ -108,7 +118,13 @@ export function createHero(scene: Scene): Promise<HeroApi | null> {
       }
 
       const api: HeroApi & {
-        playCustomAnimation: (kfs: AnimationKeyframe[]) => void
+        playCustomAnimation: (
+          kfs: AnimationKeyframe[],
+          initialPose?: {
+            rotations: Record<string, [number, number, number, number]>
+            positions?: Record<string, [number, number, number]>
+          },
+        ) => void
       } = {
         getHeadNode: () => headNode,
         playCustomAnimation,

@@ -180,17 +180,25 @@ export function createEngine(
     }
     // Check custom animation bindings first
     const customAnims = (window as any).__customAnims as
-      | Array<{ heroKey?: string; oppKey?: string; resolved: any[] }>
+      | Array<{
+          heroKey?: string
+          oppKey?: string
+          resolved: any[]
+          initialPose?: {
+            rotations: Record<string, [number, number, number, number]>
+            positions?: Record<string, [number, number, number]>
+          } | null
+        }>
       | undefined
     const key = e.key.toLowerCase()
     if (customAnims) {
       for (const ca of customAnims) {
         if (ca.heroKey && ca.heroKey === key) {
-          (window as any).__hero?.playCustomAnimation?.(ca.resolved)
+          (window as any).__hero?.playCustomAnimation?.(ca.resolved, ca.initialPose ?? undefined)
           return
         }
         if (ca.oppKey && ca.oppKey === key) {
-          (window as any).__opponent?.playCustomAnimation?.(ca.resolved)
+          (window as any).__opponent?.playCustomAnimation?.(ca.resolved, ca.initialPose ?? undefined)
           return
         }
       }
@@ -381,6 +389,16 @@ export function createEngine(
         m.root.position.copyFrom(m.position)
         selectBone(null)
       },
+      // Reset every model's bones + world position back to its scene-load
+      // defaults. Useful when sync-play left both fighters in odd states.
+      resetAll: () => {
+        stopActiveAnimation()
+        for (const m of ed.models) {
+          applyPose(m.skeleton, { rotations: m.restPose, positions: m.restPositions })
+          m.root.position.copyFrom(m.position)
+        }
+        selectBone(null)
+      },
       selectBone,
       rotateSelectedBone,
       translateSelectedBone,
@@ -398,6 +416,24 @@ export function createEngine(
         stopActiveAnimation()
         const m = active()
         activeAnimatables = playAnimation(scene, m.skeleton, keyframes, m.root)
+      },
+      // Play an animation on a SPECIFIC model (not necessarily the active
+      // one). Used by the sync-play / combo player to fire two anims at
+      // once — one per model — without touching active-model state.
+      playAnimationOnModel: (
+        modelIdx: number,
+        keyframes: AnimationKeyframe[],
+        initialPose?: {
+          rotations: Record<string, [number, number, number, number]>
+          positions?: Record<string, [number, number, number]>
+        },
+      ) => {
+        if (modelIdx < 0 || modelIdx >= ed.models.length) return
+        const m = ed.models[modelIdx]
+        if (initialPose) applyPose(m.skeleton, initialPose)
+        // Note: each call uses its own Animatables — they're returned but
+        // we don't track them globally. Combo plays don't need stop control.
+        playAnimation(scene, m.skeleton, keyframes, m.root)
       },
       // ABSOLUTE world position of the active model's root (metres).
       // Map-central, not model-relative — so you see where each model
@@ -517,6 +553,16 @@ export function createEngine(
         // Undo history is per-model; clear on switch
         undoStack.length = 0
         redoStack.length = 0
+      },
+      // Hide / show a model by toggling its root TransformNode. setEnabled
+      // hides the whole hierarchy AND skips updates — cheap and complete.
+      setModelVisible: (idx: number, visible: boolean) => {
+        if (idx < 0 || idx >= ed.models.length) return
+        ed.models[idx].root.setEnabled(visible)
+      },
+      getModelVisible: (idx: number) => {
+        if (idx < 0 || idx >= ed.models.length) return true
+        return ed.models[idx].root.isEnabled()
       },
       getInitialAnchor: () => ({
         id: '__initial__',

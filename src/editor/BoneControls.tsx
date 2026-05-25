@@ -238,7 +238,13 @@ export default function BoneControls() {
         style={resetBtnStyle}
         onClick={() => (window as any).__editor?.reset()}
       >
-        Reset to rest pose
+        Reset current model
+      </button>
+      <button
+        style={{ ...resetBtnStyle, marginTop: 4 }}
+        onClick={() => (window as any).__editor?.resetAll()}
+      >
+        Reset all models
       </button>
       </>
       )}

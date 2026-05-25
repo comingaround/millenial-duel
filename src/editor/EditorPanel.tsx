@@ -3,7 +3,13 @@ import { CSSProperties, useEffect, useState } from 'react'
 type RotationMap = Record<string, [number, number, number, number]>
 type PositionMap = Record<string, [number, number, number]>
 
-type Pose = { id: string; name: string; rotations: RotationMap; positions?: PositionMap }
+type Pose = {
+  id: string
+  name: string
+  rotations: RotationMap
+  positions?: PositionMap
+  system?: boolean
+}
 type Anchor = {
   id: string; name: string; rotations: RotationMap; positions?: PositionMap; system?: boolean
 }
@@ -20,12 +26,21 @@ type AnimKeyframe = {
 type AnimDef = {
   id: string
   name: string
+  // Starting pose the model snaps to before keyframes play. Allows the
+  // animation to begin from a known state (e.g. "Initial Position" or a
+  // saved windup pose) regardless of where the model currently is.
+  initialPoseId?: string
   keyframes: AnimKeyframe[]
   heroKey?: string
   oppKey?: string
 }
 
-type DraftAnim = { name: string; keyframes: AnimKeyframe[]; editingId?: string }
+type DraftAnim = {
+  name: string
+  initialPoseId?: string
+  keyframes: AnimKeyframe[]
+  editingId?: string
+}
 
 type EditorApi = {
   snapshot: (name: string) => Pose
@@ -65,11 +80,21 @@ export default function EditorPanel() {
   // Multi-model selector — both knights are on screen at all times; the
   // active index decides which one bone-control / anim-preview affects.
   const [models, setModels] = useState<string[]>([])
+  const [modelVisibilities, setModelVisibilities] = useState<Record<number, boolean>>({})
   const [activeModel, setActiveModelState] = useState(0)
   const setActiveModel = (idx: number) => {
     setActiveModelState(idx)
     ;(window as any).__editor?.setActiveModel?.(idx)
   }
+  // Model-edit modal: null when closed
+  const [editingModel, setEditingModel] = useState<{
+    idx: number
+    name: string
+    visible: boolean
+  } | null>(null)
+  // Sync-play: which anim to fire on each model when "Play both" is clicked
+  const [syncAnim1, setSyncAnim1] = useState<string>('')
+  const [syncAnim2, setSyncAnim2] = useState<string>('')
   const [animations, setAnimations] = useState<AnimDef[]>([])
   const [draft, setDraft] = useState<DraftAnim | null>(null)
   const [hydrated, setHydrated] = useState(false)
@@ -144,6 +169,18 @@ export default function EditorPanel() {
     ? [initialAnchor, ...anchors]
     : anchors
 
+  // Initial pose is the same idea — virtual, same data as the initial
+  // anchor, shown at the top of the Poses list.
+  const initialPose: Pose | null = initialAnchor
+    ? {
+        id: '__initial_pose__',
+        name: 'Initial Position',
+        rotations: initialAnchor.rotations,
+        system: true,
+      }
+    : null
+  const displayedPoses: Pose[] = initialPose ? [initialPose, ...poses] : poses
+
   // Persist library to disk on every change (debounced 500ms). Skip during
   // initial hydration so we don't immediately overwrite the loaded data
   // with the empty default state.
@@ -166,27 +203,36 @@ export default function EditorPanel() {
 
   // Expose resolved animations to window so engine.ts can dispatch keys
   useEffect(() => {
-    const resolved = animations.map((a) => ({
-      ...a,
-      resolved: a.keyframes
-        .map((kf) => {
-          const an = displayedAnchors.find((x) => x.id === kf.anchorId)
-          return an
-            ? {
-                anchor: { rotations: an.rotations, positions: an.positions },
-                time: kf.time,
-                displacement: kf.displacement,
-              }
-            : null
-        })
-        .filter((x) => x !== null) as Array<{
-          anchor: { rotations: RotationMap; positions?: PositionMap }
-          time: number
-          displacement?: [number, number, number]
-        }>,
-    }))
+    const allPoses = (initialPose ? [initialPose, ...poses] : poses)
+    const resolved = animations.map((a) => {
+      const initialPoseData = a.initialPoseId
+        ? allPoses.find((p) => p.id === a.initialPoseId)
+        : null
+      return {
+        ...a,
+        initialPose: initialPoseData
+          ? { rotations: initialPoseData.rotations, positions: initialPoseData.positions }
+          : null,
+        resolved: a.keyframes
+          .map((kf) => {
+            const an = displayedAnchors.find((x) => x.id === kf.anchorId)
+            return an
+              ? {
+                  anchor: { rotations: an.rotations, positions: an.positions },
+                  time: kf.time,
+                  displacement: kf.displacement,
+                }
+              : null
+          })
+          .filter((x) => x !== null) as Array<{
+            anchor: { rotations: RotationMap; positions?: PositionMap }
+            time: number
+            displacement?: [number, number, number]
+          }>,
+      }
+    })
     ;(window as any).__customAnims = resolved
-  }, [animations, anchors, editorReady])
+  }, [animations, anchors, poses, editorReady])
 
   const onOpenImport = () => {
     const ed = window.__editor
@@ -275,6 +321,7 @@ export default function EditorPanel() {
   const onEditAnimation = (anim: AnimDef) => {
     setDraft({
       name: anim.name,
+      initialPoseId: anim.initialPoseId,
       keyframes: anim.keyframes.map((k) => ({ ...k })),
       editingId: anim.id,
     })
@@ -347,6 +394,10 @@ export default function EditorPanel() {
       })
       .filter((x): x is NonNullable<typeof x> => x !== null)
 
+  // Look up a pose by id from displayed list (handles both user and system).
+  const findPose = (id?: string): Pose | undefined =>
+    id ? displayedPoses.find((p) => p.id === id) : undefined
+
   const onPreviewDraft = () => {
     if (!draft) return
     const resolved = resolveKeyframes(draft.keyframes)
@@ -354,6 +405,10 @@ export default function EditorPanel() {
       alert('Need at least 2 keyframes to preview.')
       return
     }
+    // Snap to initial pose first so the animation always starts from a
+    // known state regardless of where the model currently is.
+    const initial = findPose(draft.initialPoseId)
+    if (initial) window.__editor?.apply(initial)
     window.__editor?.playAnimation(resolved)
   }
 
@@ -368,7 +423,12 @@ export default function EditorPanel() {
       setAnimations((curr) =>
         curr.map((x) =>
           x.id === editingId
-            ? { ...x, name: draft.name, keyframes: draft.keyframes }
+            ? {
+                ...x,
+                name: draft.name,
+                initialPoseId: draft.initialPoseId,
+                keyframes: draft.keyframes,
+              }
             : x,
         ),
       )
@@ -378,6 +438,7 @@ export default function EditorPanel() {
           ? crypto.randomUUID()
           : `anim_${Date.now()}`,
         name: draft.name,
+        initialPoseId: draft.initialPoseId,
         keyframes: draft.keyframes,
       }
       setAnimations((a) => [...a, newAnim])
@@ -388,7 +449,29 @@ export default function EditorPanel() {
   const onPlayAnimation = (anim: AnimDef) => {
     const resolved = resolveKeyframes(anim.keyframes)
     if (resolved.length < 2) return
+    const initial = findPose(anim.initialPoseId)
+    if (initial) window.__editor?.apply(initial)
     window.__editor?.playAnimation(resolved)
+  }
+
+  // Sync-play: fire one anim on Model 1 and another on Model 2 at the same
+  // moment so you can watch how they synchronize (hit vs block timing).
+  const onPlaySync = () => {
+    const ed = window.__editor as any
+    const fire = (modelIdx: number, animId: string) => {
+      if (!animId) return
+      const anim = animations.find((a) => a.id === animId)
+      if (!anim) return
+      const resolved = resolveKeyframes(anim.keyframes)
+      if (resolved.length < 2) return
+      const initial = findPose(anim.initialPoseId)
+      const initialPose = initial
+        ? { rotations: initial.rotations, positions: initial.positions }
+        : undefined
+      ed?.playAnimationOnModel?.(modelIdx, resolved, initialPose)
+    }
+    fire(0, syncAnim1)
+    fire(1, syncAnim2)
   }
 
   return (
@@ -406,7 +489,15 @@ export default function EditorPanel() {
               key={idx}
               name={name}
               active={activeModel === idx}
+              hidden={modelVisibilities[idx] === false}
               onClick={() => setActiveModel(idx)}
+              onEdit={() =>
+                setEditingModel({
+                  idx,
+                  name,
+                  visible: modelVisibilities[idx] !== false,
+                })
+              }
             />
           ))
         )}
@@ -422,17 +513,17 @@ export default function EditorPanel() {
       </button>
 
       {/* Poses */}
-      <Section label={`Poses (${poses.length})`}>
-        {poses.length === 0 ? (
+      <Section label={`Poses (${displayedPoses.length})`}>
+        {displayedPoses.length === 0 ? (
           <Empty text="(none)" />
         ) : (
-          poses.map((p) => (
+          displayedPoses.map((p) => (
             <ListRow
               key={p.id}
               name={p.name}
               onClick={() => onApplyPose(p)}
-              onDelete={() => onDeletePose(p.id)}
-              onRename={promptRename(p.name, (n) => onRenamePose(p.id, n))}
+              onDelete={p.system ? undefined : () => onDeletePose(p.id)}
+              onRename={p.system ? undefined : promptRename(p.name, (n) => onRenamePose(p.id, n))}
             />
           ))
         )}
@@ -465,6 +556,23 @@ export default function EditorPanel() {
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             style={inputStyle}
           />
+          <div style={{ ...labelStyle, marginTop: 8 }}>Initial pose (before keyframes)</div>
+          <select
+            value={draft.initialPoseId ?? ''}
+            onChange={(e) =>
+              setDraft({ ...draft, initialPoseId: e.target.value || undefined })
+            }
+            style={selectStyle}
+          >
+            <option value="" style={{ background: '#1c1f24', color: '#fff' }}>
+              (none — start from current)
+            </option>
+            {displayedPoses.map((p) => (
+              <option key={p.id} value={p.id} style={{ background: '#1c1f24', color: '#fff' }}>
+                {p.name}
+              </option>
+            ))}
+          </select>
           <div style={{ ...labelStyle, marginTop: 8 }}>Keyframes</div>
           {draft.keyframes.length === 0 ? (
             <Empty text="(add anchor keyframes below)" />
@@ -541,6 +649,54 @@ export default function EditorPanel() {
       )}
 
       {/* Animations */}
+      {/* Model edit modal */}
+      {editingModel && (
+        <div style={modalBackdropStyle} onClick={() => setEditingModel(null)}>
+          <div style={modalStyle} onClick={(e) => e.stopPropagation()}>
+            <div style={modalTitleStyle}>Edit Model</div>
+
+            <label style={modalFieldStyle}>
+              <div style={modalLabelStyle}>Name</div>
+              <input
+                type="text"
+                value={editingModel.name}
+                onChange={(e) => setEditingModel({ ...editingModel, name: e.target.value })}
+                style={modalSelectStyle}
+              />
+            </label>
+
+            <div style={modalFieldStyle}>
+              <div style={modalLabelStyle}>Visibility</div>
+              <button
+                type="button"
+                style={{ ...modalBtnGhostStyle, width: '100%' }}
+                onClick={() =>
+                  setEditingModel({ ...editingModel, visible: !editingModel.visible })
+                }
+              >
+                {editingModel.visible ? '👁  Visible — click to hide' : '🚫 Hidden — click to show'}
+              </button>
+            </div>
+
+            <div style={modalBtnRowStyle}>
+              <button style={modalBtnGhostStyle} onClick={() => setEditingModel(null)}>Cancel</button>
+              <button
+                style={modalBtnPrimaryStyle}
+                onClick={() => {
+                  const { idx, name, visible } = editingModel
+                  setModels((curr) => curr.map((n, i) => (i === idx ? name.trim() || n : n)))
+                  setModelVisibilities((curr) => ({ ...curr, [idx]: visible }))
+                  ;(window as any).__editor?.setModelVisible?.(idx, visible)
+                  setEditingModel(null)
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {importOpen && (
         <div style={modalBackdropStyle} onClick={() => setImportOpen(false)}>
           <div style={modalStyle} onClick={(e) => e.stopPropagation()}>
@@ -601,6 +757,44 @@ export default function EditorPanel() {
         </div>
       )}
 
+      {/* Sync play — fire one anim per model simultaneously */}
+      <Section label="Sync Play">
+        {models.length === 0 || animations.length === 0 ? (
+          <Empty text={animations.length === 0 ? '(save anims first)' : '(no models)'} />
+        ) : (
+          <>
+            {models.map((mName, idx) => {
+              const value = idx === 0 ? syncAnim1 : syncAnim2
+              const setter = idx === 0 ? setSyncAnim1 : setSyncAnim2
+              return (
+                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, opacity: 0.7, width: 60 }}>{mName}</span>
+                  <select
+                    value={value}
+                    onChange={(e) => setter(e.target.value)}
+                    style={{ ...selectStyle, flex: 1 }}
+                  >
+                    <option value="" style={{ background: '#1c1f24', color: '#fff' }}>(none)</option>
+                    {animations.map((a) => (
+                      <option key={a.id} value={a.id} style={{ background: '#1c1f24', color: '#fff' }}>
+                        {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )
+            })}
+            <button
+              style={{ ...btnPrimary, width: '100%', marginTop: 6 }}
+              onClick={onPlaySync}
+              disabled={!syncAnim1 && !syncAnim2}
+            >
+              ▶ Play both
+            </button>
+          </>
+        )}
+      </Section>
+
       <Section label={`Animations (${animations.length})`}>
         {animations.length === 0 ? (
           <Empty text="(none)" />
@@ -641,23 +835,28 @@ function Empty({ text }: { text: string }) {
 }
 
 function ModelRow({
-  name, active, onClick,
+  name, active, hidden, onClick, onEdit,
 }: {
   name: string
   active: boolean
+  hidden: boolean
   onClick: () => void
+  onEdit: () => void
 }) {
   return (
     <div
       style={{
         ...poseRowStyle,
         ...(active ? { background: 'rgba(95, 130, 200, 0.45)', color: '#fff' } : {}),
-        cursor: 'pointer',
+        opacity: hidden ? 0.4 : 1,
       }}
-      onClick={onClick}
     >
-      <span style={{ flex: 1, fontSize: 12 }}>{name}</span>
-      {active ? <span style={{ fontSize: 10, opacity: 0.7 }}>✓</span> : null}
+      <span style={{ cursor: 'pointer', flex: 1, fontSize: 12 }} onClick={onClick}>
+        {name}
+        {hidden ? <span style={{ marginLeft: 6, opacity: 0.6, fontSize: 10 }}>(hidden)</span> : null}
+      </span>
+      {active ? <span style={{ fontSize: 10, opacity: 0.7, marginRight: 4 }}>✓</span> : null}
+      <span style={penStyle} onClick={onEdit} title="Edit (rename, hide)">✎</span>
     </div>
   )
 }
@@ -677,6 +876,9 @@ function DispInput({
         step={1}
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        // Select all on focus so typing a digit replaces the existing value
+        // (avoids "25" becoming "250" when starting from 0).
+        onFocus={(e) => e.target.select()}
         style={dispInputBoxStyle}
       />
     </label>

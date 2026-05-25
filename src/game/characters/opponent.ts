@@ -8,6 +8,7 @@ import {
   Vector3,
 } from '@babylonjs/core'
 import { playAnimation, AnimationKeyframe } from '../../editor/animation-player'
+import { applyPose } from '../../editor/pose-store'
 
 const POSITION = new Vector3(0, 0, -5)
 
@@ -78,16 +79,28 @@ export function createOpponent(scene: Scene): Promise<OpponentApi | null> {
         `[opponent] knight loaded — ${result.meshes.length} meshes`,
       )
 
-      const playCustomAnimation = (keyframes: AnimationKeyframe[]) => {
+      const playCustomAnimation = (
+        keyframes: AnimationKeyframe[],
+        initialPose?: {
+          rotations: Record<string, [number, number, number, number]>
+          positions?: Record<string, [number, number, number]>
+        },
+      ) => {
         combatIdle?.pause()
-        // Pass root so per-keyframe displacement physically moves the opponent.
+        if (initialPose) applyPose(skeleton, initialPose)
         playAnimation(scene, skeleton, keyframes, root)
         const lastTime = keyframes[keyframes.length - 1]?.time ?? 0
         setTimeout(() => combatIdle?.play(true), Math.max(50, lastTime * 1000 + 200))
       }
 
       const api: OpponentApi & {
-        playCustomAnimation: (kfs: AnimationKeyframe[]) => void
+        playCustomAnimation: (
+          kfs: AnimationKeyframe[],
+          initialPose?: {
+            rotations: Record<string, [number, number, number, number]>
+            positions?: Record<string, [number, number, number]>
+          },
+        ) => void
       } = { playCustomAnimation }
       ;(window as any).__opponent = api
       return api
