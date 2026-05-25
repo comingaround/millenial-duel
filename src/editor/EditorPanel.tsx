@@ -621,6 +621,9 @@ export default function EditorPanel() {
                     <span style={dispLabelStyle}>pos</span>
                     <DispInput label="X" value={Math.round(disp[0] * 100)} onChange={(v) => updateDisp(0, v)} />
                     <DispInput label="Y" value={Math.round(disp[1] * 100)} onChange={(v) => updateDisp(1, v)} />
+                  </div>
+                  <div style={dispRowStyle}>
+                    <span style={dispLabelStyle}>{' '}</span>
                     <DispInput label="Z" value={Math.round(disp[2] * 100)} onChange={(v) => updateDisp(2, v)} />
                     <span style={{ fontSize: 9, opacity: 0.4 }}>cm</span>
                   </div>
@@ -868,16 +871,21 @@ function DispInput({
   value: number
   onChange: (cmValue: number) => void
 }) {
+  // type=text + inputMode so arrow keys MOVE THE CURSOR inside the field
+  // (default type=number maps arrows to increment/decrement, which prevents
+  // backspace-with-arrows-style editing).
   return (
     <label style={dispFieldStyle}>
       <span style={dispAxisLabelStyle}>{label}</span>
       <input
-        type="number"
-        step={1}
+        type="text"
+        inputMode="numeric"
         value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
-        // Select all on focus so typing a digit replaces the existing value
-        // (avoids "25" becoming "250" when starting from 0).
+        onChange={(e) => {
+          const cleaned = e.target.value.replace(/[^0-9-]/g, '')
+          const parsed = parseInt(cleaned, 10)
+          onChange(Number.isFinite(parsed) ? parsed : 0)
+        }}
         onFocus={(e) => e.target.select()}
         style={dispInputBoxStyle}
       />
@@ -1286,14 +1294,14 @@ const dispAxisLabelStyle: CSSProperties = {
 }
 
 const dispInputBoxStyle: CSSProperties = {
-  width: 34,
+  width: 56,
   background: 'rgba(255, 255, 255, 0.07)',
   color: '#fff',
   border: '1px solid rgba(255, 255, 255, 0.18)',
   borderRadius: 3,
-  padding: '2px 3px',
+  padding: '3px 5px',
   fontFamily: 'monospace',
-  fontSize: 10,
+  fontSize: 11,
   outline: 'none',
   textAlign: 'right',
 }

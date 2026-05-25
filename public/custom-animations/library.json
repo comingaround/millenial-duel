@@ -1190,17 +1190,22 @@
       "name": "Block-r.top",
       "keyframes": [
         {
-          "anchorId": "pose_1779712073659_4691",
+          "anchorId": "__initial__",
           "time": 0.3,
+          "displacement": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "anchorId": "pose_1779712073659_4691",
+          "time": 0.6,
           "displacement": [
             0,
             0,
             -0.3
           ]
-        },
-        {
-          "anchorId": "__initial__",
-          "time": 0.6
         }
       ]
     }

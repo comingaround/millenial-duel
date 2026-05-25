@@ -170,6 +170,12 @@ export function createEngine(
     if (k === 'ArrowRight') keys.right = down
   }
   const onKeyDown = (e: KeyboardEvent) => {
+    // Don't swallow keystrokes when a form input is focused — the user is
+    // typing / navigating inside a number/text field.
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) {
+      return
+    }
     if (arrowSet.has(e.key)) { e.preventDefault(); setKey(e.key, true); return }
     // Editor undo / redo. Checked before custom-anim bindings so a user-bound
     // 'z' or 'y' key doesn't swallow the shortcut.
@@ -208,6 +214,10 @@ export function createEngine(
     // animation row's Hero/Opp key inputs.
   }
   const onKeyUp = (e: KeyboardEvent) => {
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) {
+      return
+    }
     if (arrowSet.has(e.key)) { e.preventDefault(); setKey(e.key, false) }
   }
   window.addEventListener('keydown', onKeyDown)
