@@ -1123,10 +1123,17 @@ const resetBtnStyle: CSSProperties = {
 
 
 const creatorAddRowStyle: CSSProperties = {
-  display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center',
+  display: 'flex',
+  gap: 6,
+  marginBottom: 10,
+  alignItems: 'center',
+  flexWrap: 'wrap',     // wrap to next line if panel is narrow
+  minWidth: 0,
 }
 const creatorSelectStyle: CSSProperties = {
-  flex: '0 0 88px',
+  flex: '1 1 80px',     // share space, shrink below content width when needed
+  minWidth: 0,
+  maxWidth: '100%',
   background: 'rgba(255, 255, 255, 0.07)',
   color: '#fff',
   border: '1px solid rgba(255, 255, 255, 0.18)',
@@ -1137,12 +1144,12 @@ const creatorSelectStyle: CSSProperties = {
   outline: 'none',
 }
 const creatorAddBtnStyle: CSSProperties = {
-  flex: 1,
+  flex: '0 0 auto',     // fixed width — never gets pushed off the row
   background: 'rgba(95, 130, 200, 0.55)',
   color: '#fff',
   border: '1px solid rgba(255, 255, 255, 0.15)',
   borderRadius: 4,
-  padding: '6px 8px',
+  padding: '6px 10px',
   fontSize: 11,
   fontFamily: 'inherit',
   fontWeight: 500,
@@ -1163,6 +1170,8 @@ const partHeaderStyle: CSSProperties = {
   alignItems: 'center',
   justifyContent: 'space-between',
   marginBottom: 2,
+  gap: 6,
+  minWidth: 0,
 }
 const partDelStyle: CSSProperties = {
   cursor: 'pointer',
