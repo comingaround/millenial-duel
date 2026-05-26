@@ -27,7 +27,7 @@ export function animationSaverPlugin(): Plugin {
               res.statusCode = 200
               res.setHeader('content-type', 'application/json')
               res.end(
-                JSON.stringify({ poses: [], anchors: [], animations: [] }),
+                JSON.stringify({ poses: [], anchors: [], animations: [], creatorParts: [] }),
               )
             }
             return

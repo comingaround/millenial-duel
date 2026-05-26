@@ -99,6 +99,10 @@ export default function EditorPanel() {
   const [draft, setDraft] = useState<DraftAnim | null>(null)
   const [hydrated, setHydrated] = useState(false)
   const [editorReady, setEditorReady] = useState(false)
+  // Bumped by the engine when any creator-part mutates. Used as a save
+  // effect dep so persistence fires on add/update/delete. Parts live on
+  // the engine, not in React state.
+  const [creatorPartsRev, setCreatorPartsRev] = useState(0)
   // Import-baked-animation modal
   const [importOpen, setImportOpen] = useState(false)
   const [bakedList, setBakedList] = useState<Array<{ name: string; from: number; to: number }>>([])
@@ -123,6 +127,25 @@ export default function EditorPanel() {
           if (Array.isArray(data.anchors))
             setAnchors(data.anchors.filter((a: Anchor) => !a.system))
           if (Array.isArray(data.animations)) setAnimations(data.animations)
+          // Creator parts — hydrate the Custom model. Wait for the editor
+          // API to be ready (createEditorScene is async); poll with a
+          // short retry. Fires on the engine side, not React state.
+          if (Array.isArray(data.creatorParts) && data.creatorParts.length > 0) {
+            const tryApply = () => {
+              const ed = (window as any).__editor
+              if (ed?.setCreatorParts) {
+                ed.setCreatorParts(data.creatorParts)
+                return true
+              }
+              return false
+            }
+            if (!tryApply()) {
+              const iv = setInterval(() => {
+                if (tryApply()) clearInterval(iv)
+              }, 200)
+              setTimeout(() => clearInterval(iv), 10000)
+            }
+          }
         }
       } catch {
         // No persistence endpoint (e.g. production build) — silent
@@ -131,6 +154,7 @@ export default function EditorPanel() {
     }
     hydrate()
 
+    let unsubCreator: (() => void) | null = null
     const tryAttach = () => {
       const ed = window.__editor
       if (!ed) return false
@@ -141,6 +165,10 @@ export default function EditorPanel() {
       if (mNames && mNames.length) setModels(mNames)
       const aIdx = (ed as any).getActiveModelIndex?.() as number | undefined
       if (typeof aIdx === 'number') setActiveModelState(aIdx)
+      // Subscribe to creator-parts mutations → bump local rev → trigger save effect.
+      unsubCreator = (ed as any).addCreatorPartsListener?.(() => {
+        setCreatorPartsRev((r) => r + 1)
+      }) ?? null
       setEditorReady(true)
       return true
     }
@@ -152,11 +180,13 @@ export default function EditorPanel() {
         cancelled = true
         clearInterval(i)
         unsub?.()
+        unsubCreator?.()
       }
     }
     return () => {
       cancelled = true
       unsub?.()
+      unsubCreator?.()
     }
   }, [])
 
@@ -187,10 +217,14 @@ export default function EditorPanel() {
   useEffect(() => {
     if (!hydrated) return
     const timer = setTimeout(() => {
+      // Pull live creator parts from engine — they're not in React state,
+      // they live on the Custom model directly.
+      const creatorParts = (window as any).__editor?.getCreatorParts?.() ?? []
       const payload = {
         poses,
         anchors: anchors.filter((a) => !a.system), // skip Initial position
         animations,
+        creatorParts,
       }
       fetch('/api/animations', {
         method: 'POST',
@@ -199,7 +233,7 @@ export default function EditorPanel() {
       }).catch(() => {})
     }, 500)
     return () => clearTimeout(timer)
-  }, [poses, anchors, animations, hydrated])
+  }, [poses, anchors, animations, hydrated, creatorPartsRev])
 
   // Expose resolved animations to window so engine.ts can dispatch keys
   useEffect(() => {

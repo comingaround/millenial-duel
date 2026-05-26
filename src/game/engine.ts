@@ -18,6 +18,13 @@ import { createBuildings } from './scene/buildings'
 import { createOpponent } from './characters/opponent'
 import { createHero } from './characters/hero'
 import { ACTIVE_BONES, createEditorScene } from '../editor/editor-scene'
+import type { CreatorPart, CreatorShape } from '../editor/editor-scene'
+import {
+  createPartMesh,
+  defaultPartFor,
+  disposePartMesh,
+  updatePartMesh,
+} from '../editor/creator-parts'
 import { createBonePicker } from '../editor/bone-picker'
 import { createEditorGizmo } from '../editor/gizmo'
 import { applyPose, snapshotPose, POSITION_BONES } from '../editor/pose-store'
@@ -112,7 +119,7 @@ export function createEngine(
     Math.PI / 2,             // looking from +Z; models face each other along X
     Math.PI / 2.4,
     5,
-    new Vector3(50.75, 1.0, 0),  // midpoint between Model 1 (50) and Model 2 (51.5)
+    new Vector3(51.5, 1.0, 0),   // centred across all three models (50, 51.5, 53)
     scene,
   )
   editorCam.fov = 0.9
@@ -259,6 +266,15 @@ export function createEngine(
     // on this one. Switchable via __editor.setActiveModel(0|1).
     let activeIdx = 0
     const active = () => ed.models[activeIdx]
+
+    // Creator parts revision — bumped on every mutation so React (or any
+    // observer) can detect changes and persist. Pull-based (no events).
+    let creatorPartsRev = 0
+    const creatorPartsListeners: Array<() => void> = []
+    const bumpCreatorParts = () => {
+      creatorPartsRev++
+      for (const l of creatorPartsListeners) l()
+    }
 
     bonePicker = createBonePicker(scene, active().skeleton, ACTIVE_BONES)
     editorGizmo = createEditorGizmo(scene, active().skeleton)
@@ -838,6 +854,91 @@ export function createEngine(
         if (idx < 0 || idx >= ed.models.length) return true
         return ed.models[idx].root.isEnabled()
       },
+
+      // ─── Character Creator (Model 3 / Custom) ────────────────────
+      // Add a geometric primitive to a bone on the Custom model. Returns
+      // the new part's id (or null if the bone wasn't found / Custom
+      // model not loaded). Gated to Custom (index 2) — no-op otherwise.
+      addCreatorPart: (shape: CreatorShape, boneName: string): string | null => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return null
+        const m = ed.models[customIdx]
+        const bone = m.skeleton.bones.find((b) => b.name === boneName)
+        const parentNode = bone?._linkedTransformNode
+        if (!parentNode) return null
+        const part = defaultPartFor(boneName, shape)
+        const inst = createPartMesh(scene, part, parentNode as any)
+        m.creatorParts.set(part.id, inst)
+        bumpCreatorParts()
+        return part.id
+      },
+
+      updateCreatorPart: (id: string, patch: Partial<CreatorPart>) => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return
+        const m = ed.models[customIdx]
+        const inst = m.creatorParts.get(id)
+        if (!inst) return
+        // Bone change → reparent. The updatePartMesh helper doesn't
+        // handle this case (different parent node), so do it inline.
+        if (patch.boneName && patch.boneName !== inst.data.boneName) {
+          const bone = m.skeleton.bones.find((b) => b.name === patch.boneName)
+          const parentNode = bone?._linkedTransformNode
+          if (parentNode) {
+            inst.mesh.parent = parentNode as any
+            inst.data.boneName = patch.boneName
+          }
+        }
+        const next = updatePartMesh(scene, inst, patch)
+        m.creatorParts.set(id, next)
+        bumpCreatorParts()
+      },
+
+      deleteCreatorPart: (id: string) => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return
+        const m = ed.models[customIdx]
+        const inst = m.creatorParts.get(id)
+        if (!inst) return
+        disposePartMesh(inst)
+        m.creatorParts.delete(id)
+        bumpCreatorParts()
+      },
+
+      getCreatorParts: (): CreatorPart[] => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return []
+        const m = ed.models[customIdx]
+        return Array.from(m.creatorParts.values()).map((i) => ({ ...i.data }))
+      },
+
+      // Bulk replace — used by persistence hydrate on page load. Disposes
+      // current parts then recreates from data.
+      setCreatorParts: (parts: CreatorPart[]) => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return
+        const m = ed.models[customIdx]
+        for (const inst of m.creatorParts.values()) disposePartMesh(inst)
+        m.creatorParts.clear()
+        for (const p of parts) {
+          const bone = m.skeleton.bones.find((b) => b.name === p.boneName)
+          const parentNode = bone?._linkedTransformNode
+          if (!parentNode) continue
+          const inst = createPartMesh(scene, p, parentNode as any)
+          m.creatorParts.set(p.id, inst)
+        }
+        bumpCreatorParts()
+      },
+      // Subscribe to creator-parts mutations. Returns an unsubscribe fn.
+      // Used by EditorPanel to trigger the debounced persistence save.
+      addCreatorPartsListener: (fn: () => void) => {
+        creatorPartsListeners.push(fn)
+        return () => {
+          const i = creatorPartsListeners.indexOf(fn)
+          if (i >= 0) creatorPartsListeners.splice(i, 1)
+        }
+      },
+      getCreatorPartsRevision: () => creatorPartsRev,
       getInitialAnchor: () => ({
         id: '__initial__',
         name: 'Initial position',

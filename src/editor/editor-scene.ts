@@ -18,8 +18,13 @@ import { POSITION_BONES } from './pose-store'
 // orient that local axis to face the other model.)
 const MODEL1_POSITION = new Vector3(50.0, 0, 0)
 const MODEL2_POSITION = new Vector3(51.5, 0, 0)   // 1.5m gap
+// Model 3 ("Custom") — character-creator target. Skeleton-only knight
+// (all GLB meshes hidden) so the user builds the body part-by-part by
+// attaching geometric primitives via the Creator tab.
+const MODEL3_POSITION = new Vector3(53.0, 0, 0)   // 1.5m from Model 2
 const MODEL1_YROT = -Math.PI / 2     // local -Z → +X (faces Model 2)
 const MODEL2_YROT =  Math.PI / 2     // local -Z → -X (faces Model 1)
+const MODEL3_YROT = -Math.PI / 2     // faces +X (same as Model 1)
 
 // Active bones: combat-relevant subset of the rig.
 //   Torso/head — Hips (whole-body lean), Spine, Chest, Neck, Head
@@ -72,6 +77,27 @@ const FALLBACK = new Color3(0.55, 0.55, 0.55)
 // Anchors / animations are applied per-instance via the engine's active-model
 // selector. Materials are shared via a single matCache passed in (so both
 // instances render with the same colors and the Style panel affects both).
+// One Creator part — a geometric primitive parented to a bone on the
+// Custom model. Author by adding/resizing via the Creator tab.
+export type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule'
+export type CreatorPart = {
+  id: string
+  boneName: string
+  shape: CreatorShape
+  scale: [number, number, number]    // dimensions in metres (in bone-local frame)
+  offset: [number, number, number]   // local position relative to bone
+  rotation: [number, number, number] // Euler degrees (X, Y, Z)
+  color: string                      // hex #rrggbb
+}
+
+// Runtime state for one creator part: data + the Babylon objects it owns.
+// Each part owns its own material (NOT shared) so its color is independent.
+export type CreatorPartInstance = {
+  data: CreatorPart
+  mesh: Mesh
+  material: StandardMaterial
+}
+
 export type ModelInstance = {
   name: string
   root: AbstractMesh
@@ -82,6 +108,8 @@ export type ModelInstance = {
   restPositions: Record<string, [number, number, number]>
   restWorldPositions: Record<string, [number, number, number]>
   position: Vector3            // initial world position (for Reset)
+  // Map<partId, instance> — only populated on the Custom model.
+  creatorParts: Map<string, CreatorPartInstance>
 }
 
 export type EditorSceneApi = {
@@ -96,6 +124,7 @@ async function loadKnightInstance(
   name: string,
   position: Vector3,
   yRotation: number,
+  hideAllMeshes = false,
 ): Promise<ModelInstance> {
   const result = await SceneLoader.ImportMeshAsync('', '/models/', 'knight.glb', scene)
   const root =
@@ -121,6 +150,15 @@ async function loadKnightInstance(
       matCache.set(matName, mat)
     }
     m.material = mat
+  }
+
+  // For the Custom model: hide every renderable mesh so only the skeleton
+  // (bone-picker spheres) is visible. Bones stay intact — skinning data
+  // and TransformNodes are unaffected by mesh visibility.
+  if (hideAllMeshes) {
+    for (const m of result.meshes) {
+      if (m instanceof Mesh && m.getTotalVertices() > 0) m.isVisible = false
+    }
   }
 
   result.animationGroups.forEach((g) => g.stop())
@@ -177,6 +215,7 @@ async function loadKnightInstance(
     restPositions,
     restWorldPositions,
     position: position.clone(),
+    creatorParts: new Map<string, CreatorPartInstance>(),
   }
 }
 
@@ -189,6 +228,9 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
 
     const m1 = await loadKnightInstance(scene, matCache, 'Model 1', MODEL1_POSITION, MODEL1_YROT)
     const m2 = await loadKnightInstance(scene, matCache, 'Model 2', MODEL2_POSITION, MODEL2_YROT)
+    // Custom (Model 3): skeleton-only — meshes hidden so user builds from
+    // primitives via the Creator tab.
+    const m3 = await loadKnightInstance(scene, matCache, 'Custom', MODEL3_POSITION, MODEL3_YROT, true)
 
     // The first load also brings in animationGroups (baked anims). Both
     // instances share these (they're scene-global) but they only target the
@@ -199,10 +241,10 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
     const allBoneNames = m1.skeleton.bones.map((b) => b.name)
 
     console.log(
-      `[editor] loaded ${2} knight instances — ${m1.skeleton.bones.length} bones each`,
+      `[editor] loaded 3 knight instances (Model 1 + Model 2 + Custom skeleton) — ${m1.skeleton.bones.length} bones each`,
     )
 
-    return { models: [m1, m2], allBoneNames, animationGroups }
+    return { models: [m1, m2, m3], allBoneNames, animationGroups }
   } catch (err) {
     console.error('[editor] load failed', err)
     return null

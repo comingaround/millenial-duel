@@ -11,8 +11,20 @@ const POS_STEP_M = 0.01              // 1 cm per click / wheel notch
 // count as ONE undo entry — keeps the undo stack from filling on wheel scrolls.
 const UNDO_BURST_MS = 300
 
-type PanelMode = 'bones' | 'style'
+type PanelMode = 'bones' | 'style' | 'creator'
 type EditorMaterial = { name: string; hex: string }
+
+// Mirror of CreatorPart from editor-scene.ts (avoid cross-import cycle).
+type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule'
+type CreatorPart = {
+  id: string
+  boneName: string
+  shape: CreatorShape
+  scale: [number, number, number]
+  offset: [number, number, number]
+  rotation: [number, number, number]
+  color: string
+}
 
 export default function BoneControls() {
   const [panelMode, setPanelMode] = useState<PanelMode>('bones')
@@ -23,6 +35,11 @@ export default function BoneControls() {
   const [pos, setPos] = useState<{ x: number; y: number; z: number } | null>(null)
   const [bodyPos, setBodyPos] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 })
   const [materials, setMaterials] = useState<EditorMaterial[]>([])
+  // ─── Creator state ───
+  const [creatorParts, setCreatorParts] = useState<CreatorPart[]>([])
+  const [activeModelIdx, setActiveModelIdx] = useState(0)
+  const [addShape, setAddShape] = useState<CreatorShape>('sphere')
+  const [addBone, setAddBone] = useState<string>('Head')
 
   useEffect(() => {
     let unsub: (() => void) | null = null
@@ -48,7 +65,7 @@ export default function BoneControls() {
   }, [])
 
   // Poll the selected bone's Euler angles + position + body world position
-  // each frame for the readout.
+  // + active-model index each frame for the readouts / Creator gating.
   useEffect(() => {
     let rafId = 0
     const tick = () => {
@@ -57,11 +74,23 @@ export default function BoneControls() {
       setPos(ed?.getSelectedBonePosition?.() ?? null)
       const bp = ed?.getBodyPosition?.()
       if (bp) setBodyPos(bp)
+      const idx = ed?.getActiveModelIndex?.()
+      if (typeof idx === 'number') setActiveModelIdx(idx)
       rafId = requestAnimationFrame(tick)
     }
     rafId = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafId)
   }, [])
+
+  // Refresh the local creator-parts mirror from the engine when entering
+  // the Creator tab (and whenever an op modifies it).
+  const refreshCreatorParts = () => {
+    const ed = (window as any).__editor
+    setCreatorParts(ed?.getCreatorParts?.() ?? [])
+  }
+  useEffect(() => {
+    if (panelMode === 'creator') refreshCreatorParts()
+  }, [panelMode])
 
   // When switching modes: hide bone spheres in Style mode (so armor is visually
   // clear), and refresh the material list. Restore bone spheres when leaving.
@@ -122,6 +151,12 @@ export default function BoneControls() {
         >
           Style
         </button>
+        <button
+          style={{ ...tabStyle, ...(panelMode === 'creator' ? tabActiveStyle : {}) }}
+          onClick={() => setPanelMode('creator')}
+        >
+          Creator
+        </button>
       </div>
 
       {/* Always-visible BODY POSITION readout — active model's WORLD coords (metres). */}
@@ -135,7 +170,18 @@ export default function BoneControls() {
         </div>
       </div>
 
-      {panelMode === 'style' ? (
+      {panelMode === 'creator' ? (
+        <CreatorTab
+          activeModelIdx={activeModelIdx}
+          parts={creatorParts}
+          addShape={addShape}
+          setAddShape={setAddShape}
+          addBone={addBone}
+          setAddBone={setAddBone}
+          activeBones={activeBones}
+          onChange={refreshCreatorParts}
+        />
+      ) : panelMode === 'style' ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={titleStyle}>MATERIALS</div>
           <div style={subtitleStyle}>{materials.length} slots — click swatch to recolor</div>
@@ -509,6 +555,224 @@ function categorize(allBones: string[]): Array<{ name: string; bones: string[] }
     .map(([name, bones]) => ({ name, bones }))
 }
 
+// ──────────────────────────────────────────────────────────────────
+// CreatorTab — build the Custom model (Model 3) by attaching geometric
+// primitives to bones. Gated to active model = 2 (Custom).
+// ──────────────────────────────────────────────────────────────────
+const CUSTOM_MODEL_IDX = 2
+const CREATOR_SHAPES: CreatorShape[] = ['sphere', 'box', 'cylinder', 'capsule']
+
+function CreatorTab({
+  activeModelIdx,
+  parts,
+  addShape,
+  setAddShape,
+  addBone,
+  setAddBone,
+  activeBones,
+  onChange,
+}: {
+  activeModelIdx: number
+  parts: CreatorPart[]
+  addShape: CreatorShape
+  setAddShape: (s: CreatorShape) => void
+  addBone: string
+  setAddBone: (b: string) => void
+  activeBones: string[]
+  onChange: () => void
+}) {
+  if (activeModelIdx !== CUSTOM_MODEL_IDX) {
+    return (
+      <div style={{ flex: 1, padding: 12, opacity: 0.7, fontSize: 12 }}>
+        Creator only operates on the <b>Custom</b> model.
+        <br />
+        <br />
+        Switch the active model to <b>Custom</b> in the left panel, then come back here.
+      </div>
+    )
+  }
+
+  const bones = activeBones.length ? activeBones : [addBone]
+  const onAdd = () => {
+    const ed = (window as any).__editor
+    ed?.addCreatorPart?.(addShape, addBone)
+    onChange()
+  }
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto' }}>
+      <div style={creatorAddRowStyle}>
+        <select
+          value={addShape}
+          onChange={(e) => setAddShape(e.target.value as CreatorShape)}
+          style={creatorSelectStyle}
+        >
+          {CREATOR_SHAPES.map((s) => (
+            <option key={s} value={s} style={{ background: '#1c1f24', color: '#fff' }}>
+              {s}
+            </option>
+          ))}
+        </select>
+        <select
+          value={addBone}
+          onChange={(e) => setAddBone(e.target.value)}
+          style={creatorSelectStyle}
+        >
+          {bones.map((b) => (
+            <option key={b} value={b} style={{ background: '#1c1f24', color: '#fff' }}>
+              {b}
+            </option>
+          ))}
+        </select>
+        <button style={creatorAddBtnStyle} onClick={onAdd}>+ Add</button>
+      </div>
+
+      <div style={{ fontSize: 10, opacity: 0.55, marginBottom: 6 }}>
+        {parts.length} part{parts.length === 1 ? '' : 's'} on Custom model
+      </div>
+
+      {parts.length === 0 ? (
+        <div style={{ fontSize: 11, opacity: 0.45 }}>
+          (Pick a shape → pick a bone → Add)
+        </div>
+      ) : (
+        parts.map((p) => (
+          <PartRow key={p.id} part={p} bones={bones} onChange={onChange} />
+        ))
+      )}
+    </div>
+  )
+}
+
+function PartRow({ part, bones, onChange }: { part: CreatorPart; bones: string[]; onChange: () => void }) {
+  const update = (patch: Partial<CreatorPart>) => {
+    ;(window as any).__editor?.updateCreatorPart?.(part.id, patch)
+    onChange()
+  }
+  const del = () => {
+    ;(window as any).__editor?.deleteCreatorPart?.(part.id)
+    onChange()
+  }
+  // Scale shown in centimetres for consistency with offset.
+  const sx = part.scale[0] * 100
+  const sy = part.scale[1] * 100
+  const sz = part.scale[2] * 100
+  const ox = part.offset[0] * 100
+  const oy = part.offset[1] * 100
+  const oz = part.offset[2] * 100
+
+  // Bone list includes the part's current bone even if it's not in
+  // ACTIVE_BONES (e.g. legacy data), so the dropdown stays selectable.
+  const dropdownBones = bones.includes(part.boneName) ? bones : [part.boneName, ...bones]
+
+  return (
+    <div style={partRowStyle}>
+      <div style={partHeaderStyle}>
+        <span style={{ fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
+          <span>{part.shape}</span>
+          <select
+            value={part.boneName}
+            onChange={(e) => update({ boneName: e.target.value })}
+            style={creatorSelectStyle}
+          >
+            {dropdownBones.map((b) => (
+              <option key={b} value={b} style={{ background: '#1c1f24', color: '#fff' }}>
+                {b}
+              </option>
+            ))}
+          </select>
+        </span>
+        <span style={partDelStyle} onClick={del} title="Delete">×</span>
+      </div>
+      <PartTripleRow
+        label="size"
+        x={sx} y={sy} z={sz}
+        onSet={(axis, cm) => {
+          const next: [number, number, number] = [...part.scale]
+          next[axis] = Math.max(0.5, cm) / 100
+          update({ scale: next })
+        }}
+      />
+      <PartTripleRow
+        label="offset"
+        x={ox} y={oy} z={oz}
+        onSet={(axis, cm) => {
+          const next: [number, number, number] = [...part.offset]
+          next[axis] = cm / 100
+          update({ offset: next })
+        }}
+      />
+      <PartTripleRow
+        label="rot°"
+        x={part.rotation[0]} y={part.rotation[1]} z={part.rotation[2]}
+        onSet={(axis, deg) => {
+          const next: [number, number, number] = [...part.rotation]
+          next[axis] = deg
+          update({ rotation: next })
+        }}
+      />
+      <div style={partColorRowStyle}>
+        <span style={{ fontSize: 10, opacity: 0.55, width: 38 }}>color</span>
+        <input
+          type="color"
+          value={part.color}
+          onChange={(e) => update({ color: e.target.value })}
+          style={partSwatchStyle}
+        />
+        <span style={{ fontFamily: 'monospace', fontSize: 9, opacity: 0.45 }}>
+          {part.color.toUpperCase()}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function PartTripleRow({
+  label, x, y, z, onSet,
+}: {
+  label: string
+  x: number; y: number; z: number
+  onSet: (axis: 0 | 1 | 2, value: number) => void
+}) {
+  const fmt = (n: number) => Number.isInteger(n) ? `${n}` : n.toFixed(1)
+  return (
+    <div style={partTripleRowStyle}>
+      <span style={{ fontSize: 10, opacity: 0.55, width: 38 }}>{label}</span>
+      <PartNumInput value={fmt(x)} onCommit={(v) => onSet(0, v)} />
+      <PartNumInput value={fmt(y)} onCommit={(v) => onSet(1, v)} />
+      <PartNumInput value={fmt(z)} onCommit={(v) => onSet(2, v)} />
+    </div>
+  )
+}
+
+function PartNumInput({
+  value, onCommit,
+}: { value: string; onCommit: (v: number) => void }) {
+  const [text, setText] = useState(value)
+  const [focused, setFocused] = useState(false)
+  useEffect(() => { if (!focused) setText(value) }, [value, focused])
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onFocus={(e) => { setFocused(true); e.target.select() }}
+      onBlur={() => {
+        setFocused(false)
+        const n = parseFloat(text)
+        if (Number.isFinite(n)) onCommit(n)
+        else setText(value)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        if (e.key === 'Escape') { setText(value); (e.target as HTMLInputElement).blur() }
+      }}
+      style={partNumInputStyle}
+    />
+  )
+}
+
 const panelStyle: CSSProperties = {
   position: 'fixed',
   right: 0,
@@ -856,3 +1120,87 @@ const resetBtnStyle: CSSProperties = {
   letterSpacing: 0.3,
 }
 
+
+
+const creatorAddRowStyle: CSSProperties = {
+  display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center',
+}
+const creatorSelectStyle: CSSProperties = {
+  flex: '0 0 88px',
+  background: 'rgba(255, 255, 255, 0.07)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 3,
+  padding: '4px 6px',
+  fontFamily: 'inherit',
+  fontSize: 11,
+  outline: 'none',
+}
+const creatorAddBtnStyle: CSSProperties = {
+  flex: 1,
+  background: 'rgba(95, 130, 200, 0.55)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.15)',
+  borderRadius: 4,
+  padding: '6px 8px',
+  fontSize: 11,
+  fontFamily: 'inherit',
+  fontWeight: 500,
+  cursor: 'pointer',
+}
+const partRowStyle: CSSProperties = {
+  background: 'rgba(255, 255, 255, 0.04)',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  borderRadius: 4,
+  padding: '6px 8px',
+  marginBottom: 6,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 3,
+}
+const partHeaderStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  marginBottom: 2,
+}
+const partDelStyle: CSSProperties = {
+  cursor: 'pointer',
+  opacity: 0.5,
+  fontWeight: 700,
+  padding: '0 4px',
+}
+const partTripleRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+}
+const partNumInputStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  background: 'rgba(255, 255, 255, 0.07)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 3,
+  padding: '2px 4px',
+  fontFamily: 'monospace',
+  fontSize: 10,
+  outline: 'none',
+  textAlign: 'right',
+}
+const partColorRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  marginTop: 2,
+}
+const partSwatchStyle: CSSProperties = {
+  width: 28,
+  height: 18,
+  padding: 0,
+  border: '1px solid rgba(255, 255, 255, 0.25)',
+  borderRadius: 3,
+  background: 'transparent',
+  cursor: 'pointer',
+  flexShrink: 0,
+}
