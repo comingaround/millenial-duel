@@ -1212,11 +1212,74 @@
   ],
   "creatorParts": [
     {
-      "id": "part_1779799412295_7r1r",
-      "boneName": "Chest",
+      "id": "part_1779803621663_15b6",
+      "boneName": "Upper Leg.R",
       "shape": "clone",
       "scale": [
-        0.8,
+        1,
+        1,
+        1
+      ],
+      "offset": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#050505"
+    },
+    {
+      "id": "part_1779803647880_2yyw",
+      "boneName": "Upper Leg.L",
+      "shape": "clone",
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "offset": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#000000"
+    },
+    {
+      "id": "part_1779803720833_axv3",
+      "boneName": "Spine",
+      "shape": "clone",
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "offset": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#d9534f"
+    },
+    {
+      "id": "part_1779803732230_3ybo",
+      "boneName": "Hips",
+      "shape": "clone",
+      "scale": [
+        1,
         1,
         1
       ],

@@ -155,20 +155,25 @@ export default function EditorPanel() {
     hydrate()
 
     let unsubCreator: (() => void) | null = null
+    let unsubModels: (() => void) | null = null
     const tryAttach = () => {
       const ed = window.__editor
       if (!ed) return false
       unsub = ed.addBoneSelectListener((name) => setSelectedBone(name))
       setSelectedBone(ed.getSelectedBone())
-      // Pull initial models list + active index
-      const mNames = (ed as any).getModels?.() as string[] | undefined
-      if (mNames && mNames.length) setModels(mNames)
+      const pullModels = () => {
+        const mNames = (ed as any).getModels?.() as string[] | undefined
+        if (mNames) setModels(mNames)
+      }
+      pullModels()
       const aIdx = (ed as any).getActiveModelIndex?.() as number | undefined
       if (typeof aIdx === 'number') setActiveModelState(aIdx)
       // Subscribe to creator-parts mutations → bump local rev → trigger save effect.
       unsubCreator = (ed as any).addCreatorPartsListener?.(() => {
         setCreatorPartsRev((r) => r + 1)
       }) ?? null
+      // Re-pull names + visibilities when a model is spawned at runtime.
+      unsubModels = (ed as any).addModelsChangeListener?.(pullModels) ?? null
       setEditorReady(true)
       return true
     }
@@ -181,12 +186,14 @@ export default function EditorPanel() {
         clearInterval(i)
         unsub?.()
         unsubCreator?.()
+        unsubModels?.()
       }
     }
     return () => {
       cancelled = true
       unsub?.()
       unsubCreator?.()
+      unsubModels?.()
     }
   }, [])
 
@@ -512,9 +519,25 @@ export default function EditorPanel() {
     <div style={panelStyle}>
       <h3 style={titleStyle}>EDITOR</h3>
 
-      {/* Models — both knights are always on screen; click to choose which
-          one bone-control / animation preview operates on. */}
-      <Section label={`Models (${models.length})`}>
+      {/* Models — knights are always on screen; click to choose which
+          one bone-control / animation preview operates on. Click + to
+          spawn another, click 👁/🚫 to toggle visibility in-place. */}
+      <Section
+        label={`Models (${models.length})`}
+        action={
+          <button
+            style={sectionPlusBtnStyle}
+            title="Add a new knight (visible)"
+            onClick={async () => {
+              const ed = (window as any).__editor
+              const newIdx = await ed?.addModel?.()
+              if (typeof newIdx === 'number') setActiveModel(newIdx)
+            }}
+          >
+            +
+          </button>
+        }
+      >
         {models.length === 0 ? (
           <Empty text="(loading…)" />
         ) : (
@@ -525,6 +548,11 @@ export default function EditorPanel() {
               active={activeModel === idx}
               hidden={modelVisibilities[idx] === false}
               onClick={() => setActiveModel(idx)}
+              onToggleHidden={() => {
+                const nextVisible = !(modelVisibilities[idx] !== false)
+                ;(window as any).__editor?.setModelVisible?.(idx, nextVisible)
+                setModelVisibilities((curr) => ({ ...curr, [idx]: nextVisible }))
+              }}
               onEdit={() =>
                 setEditingModel({
                   idx,
@@ -858,10 +886,21 @@ export default function EditorPanel() {
   )
 }
 
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
+function Section({
+  label,
+  children,
+  action,
+}: {
+  label: string
+  children: React.ReactNode
+  action?: React.ReactNode
+}) {
   return (
     <div style={sectionStyle}>
-      <div style={labelStyle}>{label}</div>
+      <div style={sectionHeaderStyle}>
+        <div style={labelStyle}>{label}</div>
+        {action}
+      </div>
       {children}
     </div>
   )
@@ -872,12 +911,13 @@ function Empty({ text }: { text: string }) {
 }
 
 function ModelRow({
-  name, active, hidden, onClick, onEdit,
+  name, active, hidden, onClick, onToggleHidden, onEdit,
 }: {
   name: string
   active: boolean
   hidden: boolean
   onClick: () => void
+  onToggleHidden: () => void
   onEdit: () => void
 }) {
   return (
@@ -893,6 +933,13 @@ function ModelRow({
         {hidden ? <span style={{ marginLeft: 6, opacity: 0.6, fontSize: 10 }}>(hidden)</span> : null}
       </span>
       {active ? <span style={{ fontSize: 10, opacity: 0.7, marginRight: 4 }}>✓</span> : null}
+      <span
+        style={penStyle}
+        onClick={onToggleHidden}
+        title={hidden ? 'Show model' : 'Hide model'}
+      >
+        {hidden ? '🚫' : '👁'}
+      </span>
       <span style={penStyle} onClick={onEdit} title="Edit (rename, hide)">✎</span>
     </div>
   )
@@ -1041,6 +1088,29 @@ const titleStyle: CSSProperties = {
 }
 
 const sectionStyle: CSSProperties = { marginBottom: 14 }
+const sectionHeaderStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 6,
+  marginBottom: 4,
+}
+const sectionPlusBtnStyle: CSSProperties = {
+  background: 'rgba(95, 130, 200, 0.55)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 4,
+  width: 22,
+  height: 18,
+  fontSize: 14,
+  lineHeight: 1,
+  fontWeight: 700,
+  padding: 0,
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
 
 const labelStyle: CSSProperties = {
   opacity: 0.55,

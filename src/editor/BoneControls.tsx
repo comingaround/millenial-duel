@@ -1,4 +1,4 @@
-import { CSSProperties, useEffect, useRef, useState } from 'react'
+import React, { CSSProperties, useEffect, useRef, useState } from 'react'
 
 type Axis = 'x' | 'y' | 'z'
 
@@ -24,6 +24,8 @@ type CreatorPart = {
   offset: [number, number, number]
   rotation: [number, number, number]
   color: string
+  sourceMeshName?: string
+  groupMeshNames?: string[]
 }
 
 export default function BoneControls() {
@@ -34,12 +36,22 @@ export default function BoneControls() {
   const [euler, setEuler] = useState<{ x: number; y: number; z: number } | null>(null)
   const [pos, setPos] = useState<{ x: number; y: number; z: number } | null>(null)
   const [bodyPos, setBodyPos] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 })
+  const commitBodyPosition = (x: number, y: number, z: number) => {
+    ;(window as any).__editor?.setBodyPosition?.(x, y, z)
+    setBodyPos({ x, y, z })
+  }
   const [materials, setMaterials] = useState<EditorMaterial[]>([])
   // ─── Creator state ───
   const [creatorParts, setCreatorParts] = useState<CreatorPart[]>([])
   const [activeModelIdx, setActiveModelIdx] = useState(0)
-  const [addShape, setAddShape] = useState<CreatorShape>('sphere')
-  const [addBone, setAddBone] = useState<string>('Head')
+  // addTarget is a string formatted as either "bone:Head" or "prop:Sword".
+  // Single dropdown with both kinds; the prefix tells the engine which
+  // path to dispatch on Add.
+  const [addTarget, setAddTarget] = useState<string>('bone:Head')
+  const [creatorTargets, setCreatorTargets] = useState<{
+    bones: string[]
+    props: Array<{ stem: string; members: string[] }>
+  }>({ bones: [], props: [] })
 
   useEffect(() => {
     let unsub: (() => void) | null = null
@@ -89,7 +101,15 @@ export default function BoneControls() {
     setCreatorParts(ed?.getCreatorParts?.() ?? [])
   }
   useEffect(() => {
-    if (panelMode === 'creator') refreshCreatorParts()
+    if (panelMode === 'creator') {
+      refreshCreatorParts()
+      // Refresh the bone+prop target list every time the Creator tab
+      // opens — source meshes don't change at runtime but lazy-init avoids
+      // running the enumeration before the engine is ready.
+      const ed = (window as any).__editor
+      const t = ed?.getCreatorTargets?.()
+      if (t) setCreatorTargets(t)
+    }
   }, [panelMode])
 
   // When switching modes: hide bone spheres in Style mode (so armor is visually
@@ -159,13 +179,16 @@ export default function BoneControls() {
         </button>
       </div>
 
-      {/* Always-visible BODY POSITION readout — active model's WORLD coords (metres). */}
+      {/* Editable BODY POSITION — active model's WORLD coords (metres).
+          Setting these values moves the spawn position (model.position)
+          AND snaps root.position to it, so the model appears at the
+          chosen location immediately. Each model can spawn anywhere. */}
       <div style={bodyPosBlockStyle}>
         <div style={bodyPosLabelStyle}>BODY POSITION (world)</div>
         <div style={bodyPosRowStyle}>
-          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>X</span>{bodyPos.x.toFixed(2)}</span>
-          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>Y</span>{bodyPos.y.toFixed(2)}</span>
-          <span style={bodyPosCellStyle}><span style={bodyPosAxisStyle}>Z</span>{bodyPos.z.toFixed(2)}</span>
+          <BodyPosInput axis="X" value={bodyPos.x} onCommit={(x) => commitBodyPosition(x, bodyPos.y, bodyPos.z)} />
+          <BodyPosInput axis="Y" value={bodyPos.y} onCommit={(y) => commitBodyPosition(bodyPos.x, y, bodyPos.z)} />
+          <BodyPosInput axis="Z" value={bodyPos.z} onCommit={(z) => commitBodyPosition(bodyPos.x, bodyPos.y, z)} />
           <span style={{ fontSize: 9, opacity: 0.4, marginLeft: 2 }}>m</span>
         </div>
       </div>
@@ -174,10 +197,9 @@ export default function BoneControls() {
         <CreatorTab
           activeModelIdx={activeModelIdx}
           parts={creatorParts}
-          addShape={addShape}
-          setAddShape={setAddShape}
-          addBone={addBone}
-          setAddBone={setAddBone}
+          addTarget={addTarget}
+          setAddTarget={setAddTarget}
+          creatorTargets={creatorTargets}
           activeBones={activeBones}
           onChange={refreshCreatorParts}
         />
@@ -556,28 +578,28 @@ function categorize(allBones: string[]): Array<{ name: string; bones: string[] }
 }
 
 // ──────────────────────────────────────────────────────────────────
-// CreatorTab — build the Custom model (Model 3) by attaching geometric
-// primitives to bones. Gated to active model = 2 (Custom).
+// CreatorTab — build the Custom model (Model 3) by cloning body parts
+// + props (sword, shield) from Model 1. Gated to active model = 2.
+// Procedural primitives (sphere/box/cylinder/capsule) were dropped from
+// the Add UI — the clone path covers all real use cases. Legacy parts
+// in library.json still render via creator-parts.ts.
 // ──────────────────────────────────────────────────────────────────
 const CUSTOM_MODEL_IDX = 2
-const CREATOR_SHAPES: CreatorShape[] = ['sphere', 'box', 'cylinder', 'capsule', 'clone']
 
 function CreatorTab({
   activeModelIdx,
   parts,
-  addShape,
-  setAddShape,
-  addBone,
-  setAddBone,
+  addTarget,
+  setAddTarget,
+  creatorTargets,
   activeBones,
   onChange,
 }: {
   activeModelIdx: number
   parts: CreatorPart[]
-  addShape: CreatorShape
-  setAddShape: (s: CreatorShape) => void
-  addBone: string
-  setAddBone: (b: string) => void
+  addTarget: string
+  setAddTarget: (t: string) => void
+  creatorTargets: { bones: string[]; props: Array<{ stem: string; members: string[] }> }
   activeBones: string[]
   onChange: () => void
 }) {
@@ -592,39 +614,98 @@ function CreatorTab({
     )
   }
 
-  const bones = activeBones.length ? activeBones : [addBone]
+  // Targets: bones first, then prop stems. Encoded as "bone:Name" or
+  // "prop:stem" — for groups, the engine resolves member meshes by stem.
+  // Bone list is the ACTIVE subset (19 combat-relevant bones) — fingers/
+  // toes/IK helpers aren't useful clone targets, so they're hidden.
+  const activeBoneSet = new Set(activeBones)
+  const boneOptions = (creatorTargets.bones.length ? creatorTargets.bones : activeBones)
+    .filter((b) => activeBoneSet.has(b))
+  const propOptions = creatorTargets.props
+  const propByStem = new Map(propOptions.map((p) => [p.stem, p]))
   const onAdd = () => {
     const ed = (window as any).__editor
-    ed?.addCreatorPart?.(addShape, addBone)
+    if (addTarget.startsWith('prop:')) {
+      const stem = addTarget.slice(5)
+      const prop = propByStem.get(stem)
+      if (!prop) return
+      // Single-primitive → flat prop clone. Multi-primitive → group.
+      if (prop.members.length > 1) {
+        ed?.addCreatorPropGroupClone?.(stem, prop.members)
+      } else {
+        ed?.addCreatorPropClone?.(prop.members[0])
+      }
+    } else {
+      const bone = addTarget.startsWith('bone:') ? addTarget.slice(5) : addTarget
+      ed?.addCreatorPart?.('clone', bone)
+    }
     onChange()
   }
+
+  // Bones grouped by body part via the existing categorize() helper.
+  // Filter out empty groups + the "Other" catch-all when it's empty.
+  const boneGroups = categorize(boneOptions).filter((g) => g.bones.length > 0)
+  // Weapons grouped by type (sword/shield/other). Keyword match on stem
+  // — works for the current rig where weapon mesh names contain "sword"
+  // or "shield". When new weapon types arrive (axe, bow, …), add a
+  // matcher here.
+  const weaponSubcats: Array<{ name: string; props: typeof propOptions }> = [
+    { name: 'Sword',  props: propOptions.filter((p) => /sword/i.test(p.stem)) },
+    { name: 'Shield', props: propOptions.filter((p) => /shield/i.test(p.stem)) },
+    { name: 'Other',  props: propOptions.filter((p) => !/sword|shield/i.test(p.stem)) },
+  ].filter((s) => s.props.length > 0)
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto' }}>
       <div style={creatorAddRowStyle}>
         <select
-          value={addShape}
-          onChange={(e) => setAddShape(e.target.value as CreatorShape)}
-          style={creatorSelectStyle}
+          value={addTarget}
+          onChange={(e) => setAddTarget(e.target.value)}
+          style={{ ...creatorSelectStyle, flex: '1 1 100%' }}
         >
-          {CREATOR_SHAPES.map((s) => (
-            <option key={s} value={s} style={{ background: '#1c1f24', color: '#fff' }}>
-              {s}
+          {/* True 3-level nesting in a native <select> is impossible
+              (browsers ignore nested optgroups + style optgroup labels
+              via OS theme). We emulate it with disabled separator rows
+              and unicode-space indentation on each level:
+                ▸ Category            (disabled, no indent)
+                  ▸ Subcategory       (disabled, 1 indent)
+                      Item            (selectable, 2 indents) */}
+          {boneGroups.length > 0 ? (
+            <option disabled value="" style={creatorCategoryStyle}>
+              {'▸ Bones'}
             </option>
+          ) : null}
+          {boneGroups.map((g) => (
+            <React.Fragment key={`bg-${g.name}`}>
+              <option disabled value="" style={creatorSubcategoryStyle}>
+                {`   ▸ ${g.name}`}
+              </option>
+              {g.bones.map((b) => (
+                <option key={`b-${b}`} value={`bone:${b}`} style={creatorItemStyle}>
+                  {`        ${b}`}
+                </option>
+              ))}
+            </React.Fragment>
+          ))}
+          {weaponSubcats.length > 0 ? (
+            <option disabled value="" style={creatorCategoryStyle}>
+              {'▸ Weapons'}
+            </option>
+          ) : null}
+          {weaponSubcats.map((s) => (
+            <React.Fragment key={`wg-${s.name}`}>
+              <option disabled value="" style={creatorSubcategoryStyle}>
+                {`   ▸ ${s.name}`}
+              </option>
+              {s.props.map((p) => (
+                <option key={`p-${p.stem}`} value={`prop:${p.stem}`} style={creatorItemStyle}>
+                  {`        ${p.stem}${p.members.length > 1 ? ` (${p.members.length} parts)` : ''}`}
+                </option>
+              ))}
+            </React.Fragment>
           ))}
         </select>
-        <select
-          value={addBone}
-          onChange={(e) => setAddBone(e.target.value)}
-          style={creatorSelectStyle}
-        >
-          {bones.map((b) => (
-            <option key={b} value={b} style={{ background: '#1c1f24', color: '#fff' }}>
-              {b}
-            </option>
-          ))}
-        </select>
-        <button style={creatorAddBtnStyle} onClick={onAdd}>+ Add</button>
+        <button style={creatorAddBtnStyle} onClick={onAdd}>+ Add clone</button>
       </div>
 
       <div style={{ fontSize: 10, opacity: 0.55, marginBottom: 6 }}>
@@ -633,11 +714,11 @@ function CreatorTab({
 
       {parts.length === 0 ? (
         <div style={{ fontSize: 11, opacity: 0.45 }}>
-          (Pick a shape → pick a bone → Add)
+          (Pick a body bone or prop → Add clone)
         </div>
       ) : (
         parts.map((p) => (
-          <PartRow key={p.id} part={p} bones={bones} onChange={onChange} />
+          <PartRow key={p.id} part={p} bones={boneOptions} onChange={onChange} />
         ))
       )}
     </div>
@@ -645,6 +726,7 @@ function CreatorTab({
 }
 
 function PartRow({ part, bones, onChange }: { part: CreatorPart; bones: string[]; onChange: () => void }) {
+  const [expanded, setExpanded] = useState(false)
   const update = (patch: Partial<CreatorPart>) => {
     ;(window as any).__editor?.updateCreatorPart?.(part.id, patch)
     onChange()
@@ -665,64 +747,90 @@ function PartRow({ part, bones, onChange }: { part: CreatorPart; bones: string[]
   // ACTIVE_BONES (e.g. legacy data), so the dropdown stays selectable.
   const dropdownBones = bones.includes(part.boneName) ? bones : [part.boneName, ...bones]
 
+  // Label: prop name (single OR group stem) or fallback to shape.
+  const kindLabel = part.sourceMeshName
+    ? `${part.sourceMeshName}${part.groupMeshNames ? ` (${part.groupMeshNames.length})` : ''}`
+    : part.shape
   return (
     <div style={partRowStyle}>
-      <div style={partHeaderStyle}>
-        <span style={{ fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
-          <span>{part.shape}</span>
-          <select
-            value={part.boneName}
-            onChange={(e) => update({ boneName: e.target.value })}
-            style={creatorSelectStyle}
-          >
-            {dropdownBones.map((b) => (
-              <option key={b} value={b} style={{ background: '#1c1f24', color: '#fff' }}>
-                {b}
-              </option>
-            ))}
-          </select>
+      {/* Header row 1: chevron + title + delete. Click chevron OR title
+          to toggle accordion. Stacked layout: title gets its own row. */}
+      <div style={partHeaderRow1Style}>
+        <span
+          style={partChevronStyle}
+          onClick={() => setExpanded((v) => !v)}
+          title={expanded ? 'Collapse' : 'Expand'}
+        >
+          {expanded ? '▼' : '▶'}
+        </span>
+        <span
+          style={partTitleStyle}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {kindLabel}
         </span>
         <span style={partDelStyle} onClick={del} title="Delete">×</span>
       </div>
-      <PartTripleRow
-        label={part.shape === 'clone' ? 'size %' : 'size'}
-        x={sx} y={sy} z={sz}
-        onSet={(axis, cm) => {
-          const next: [number, number, number] = [...part.scale]
-          next[axis] = Math.max(0.5, cm) / 100
-          update({ scale: next })
-        }}
-      />
-      <PartTripleRow
-        label="offset"
-        x={ox} y={oy} z={oz}
-        onSet={(axis, cm) => {
-          const next: [number, number, number] = [...part.offset]
-          next[axis] = cm / 100
-          update({ offset: next })
-        }}
-      />
-      <PartTripleRow
-        label="rot°"
-        x={part.rotation[0]} y={part.rotation[1]} z={part.rotation[2]}
-        onSet={(axis, deg) => {
-          const next: [number, number, number] = [...part.rotation]
-          next[axis] = deg
-          update({ rotation: next })
-        }}
-      />
-      <div style={partColorRowStyle}>
-        <span style={{ fontSize: 10, opacity: 0.55, width: 38 }}>color</span>
-        <input
-          type="color"
-          value={part.color}
-          onChange={(e) => update({ color: e.target.value })}
-          style={partSwatchStyle}
-        />
-        <span style={{ fontFamily: 'monospace', fontSize: 9, opacity: 0.45 }}>
-          {part.color.toUpperCase()}
-        </span>
+      {/* Header row 2: bone retarget — always visible so user can move
+          a collapsed part between bones without expanding. */}
+      <div style={partHeaderRow2Style}>
+        <span style={partBoneLabelStyle}>bone</span>
+        <select
+          value={part.boneName}
+          onChange={(e) => update({ boneName: e.target.value })}
+          style={{ ...creatorSelectStyle, flex: '1 1 100%' }}
+        >
+          {dropdownBones.map((b) => (
+            <option key={b} value={b} style={{ background: '#1c1f24', color: '#fff' }}>
+              {b}
+            </option>
+          ))}
+        </select>
       </div>
+      {/* Accordion body — size / offset / rotation / color. */}
+      {expanded ? (
+        <>
+          <PartTripleRow
+            label={part.shape === 'clone' ? 'size %' : 'size'}
+            x={sx} y={sy} z={sz}
+            onSet={(axis, cm) => {
+              const next: [number, number, number] = [...part.scale]
+              next[axis] = Math.max(0.5, cm) / 100
+              update({ scale: next })
+            }}
+          />
+          <PartTripleRow
+            label="offset"
+            x={ox} y={oy} z={oz}
+            onSet={(axis, cm) => {
+              const next: [number, number, number] = [...part.offset]
+              next[axis] = cm / 100
+              update({ offset: next })
+            }}
+          />
+          <PartTripleRow
+            label="rot°"
+            x={part.rotation[0]} y={part.rotation[1]} z={part.rotation[2]}
+            onSet={(axis, deg) => {
+              const next: [number, number, number] = [...part.rotation]
+              next[axis] = deg
+              update({ rotation: next })
+            }}
+          />
+          <div style={partColorRowStyle}>
+            <span style={{ fontSize: 10, opacity: 0.55, width: 38 }}>color</span>
+            <input
+              type="color"
+              value={part.color}
+              onChange={(e) => update({ color: e.target.value })}
+              style={partSwatchStyle}
+            />
+            <span style={{ fontFamily: 'monospace', fontSize: 9, opacity: 0.45 }}>
+              {part.color.toUpperCase()}
+            </span>
+          </div>
+        </>
+      ) : null}
     </div>
   )
 }
@@ -773,11 +881,46 @@ function PartNumInput({
   )
 }
 
+// Body-position cell: axis label + editable number. Holds local draft
+// state while focused so the per-frame rAF tick doesn't overwrite mid-type.
+function BodyPosInput({
+  axis, value, onCommit,
+}: { axis: string; value: number; onCommit: (v: number) => void }) {
+  const [text, setText] = useState(value.toFixed(2))
+  const [focused, setFocused] = useState(false)
+  useEffect(() => { if (!focused) setText(value.toFixed(2)) }, [value, focused])
+  return (
+    <label style={bodyPosCellStyle}>
+      <span style={bodyPosAxisStyle}>{axis}</span>
+      <input
+        type="text"
+        inputMode="decimal"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onFocus={(e) => { setFocused(true); e.target.select() }}
+        onBlur={() => {
+          setFocused(false)
+          const n = parseFloat(text)
+          if (Number.isFinite(n)) onCommit(n)
+          else setText(value.toFixed(2))
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          if (e.key === 'Escape') { setText(value.toFixed(2)); (e.target as HTMLInputElement).blur() }
+        }}
+        style={bodyPosInputStyle}
+      />
+    </label>
+  )
+}
+
 const panelStyle: CSSProperties = {
   position: 'fixed',
   right: 0,
   top: 0,
-  bottom: 0,
+  // Leave room for the CameraToggle pill at right:20, bottom:20 (~40px tall
+  // plus its own 20px gap) so the panel never overlaps the camera selector.
+  bottom: 76,
   width: 240,
   padding: 14,
   background: 'rgba(20, 22, 25, 0.92)',
@@ -786,8 +929,12 @@ const panelStyle: CSSProperties = {
   fontSize: 13,
   zIndex: 9,
   borderLeft: '1px solid rgba(255, 255, 255, 0.08)',
+  borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
   backdropFilter: 'blur(6px)',
-  overflowY: 'auto',
+  // Outer panel does NOT scroll — inner sections do. Without this, the
+  // Creator tab's parts list created a double scrollbar (one on the
+  // panel, one on the list) and chunks of UI would scroll off-screen.
+  overflow: 'hidden',
   display: 'flex',
   flexDirection: 'column',
   userSelect: 'none',
@@ -880,7 +1027,7 @@ const bodyPosLabelStyle: CSSProperties = {
 const bodyPosRowStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  gap: 10,
+  gap: 6,
   fontFamily: 'monospace',
   fontSize: 12,
 }
@@ -889,6 +1036,22 @@ const bodyPosCellStyle: CSSProperties = {
   display: 'inline-flex',
   alignItems: 'center',
   gap: 3,
+  flex: 1,
+  minWidth: 0,
+}
+
+const bodyPosInputStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  background: 'rgba(255, 255, 255, 0.07)',
+  color: '#fff',
+  border: '1px solid rgba(255, 255, 255, 0.18)',
+  borderRadius: 3,
+  padding: '2px 4px',
+  fontFamily: 'monospace',
+  fontSize: 11,
+  outline: 'none',
+  textAlign: 'right',
 }
 
 const bodyPosAxisStyle: CSSProperties = {
@@ -1155,6 +1318,28 @@ const creatorAddBtnStyle: CSSProperties = {
   fontWeight: 500,
   cursor: 'pointer',
 }
+// Tree-style category headers inside the dropdown. Native <optgroup>
+// labels use the OS theme and don't pick up dark-mode colours, so we
+// build the visual hierarchy from regular <option> rows: 3 styles =
+// 3 levels of nesting (category > subcategory > item).
+const creatorCategoryStyle: CSSProperties = {
+  background: '#0a0c0f',
+  color: '#cbd5e1',
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: 0.6,
+}
+const creatorSubcategoryStyle: CSSProperties = {
+  background: '#13161b',
+  color: '#94a3b8',
+  fontSize: 10,
+  fontWeight: 600,
+}
+const creatorItemStyle: CSSProperties = {
+  background: '#1c1f24',
+  color: '#fff',
+  fontSize: 11,
+}
 const partRowStyle: CSSProperties = {
   background: 'rgba(255, 255, 255, 0.04)',
   border: '1px solid rgba(255, 255, 255, 0.08)',
@@ -1165,19 +1350,51 @@ const partRowStyle: CSSProperties = {
   flexDirection: 'column',
   gap: 3,
 }
-const partHeaderStyle: CSSProperties = {
+const partHeaderRow1Style: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  justifyContent: 'space-between',
-  marginBottom: 2,
   gap: 6,
   minWidth: 0,
+  marginBottom: 2,
+}
+const partChevronStyle: CSSProperties = {
+  cursor: 'pointer',
+  fontSize: 9,
+  opacity: 0.65,
+  width: 12,
+  textAlign: 'center',
+  userSelect: 'none',
+  flexShrink: 0,
+}
+const partTitleStyle: CSSProperties = {
+  cursor: 'pointer',
+  fontSize: 12,
+  fontWeight: 600,
+  flex: 1,
+  minWidth: 0,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+const partHeaderRow2Style: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  minWidth: 0,
+  marginBottom: 4,
+}
+const partBoneLabelStyle: CSSProperties = {
+  fontSize: 10,
+  opacity: 0.55,
+  width: 30,
+  flexShrink: 0,
 }
 const partDelStyle: CSSProperties = {
   cursor: 'pointer',
   opacity: 0.5,
   fontWeight: 700,
   padding: '0 4px',
+  flexShrink: 0,
 }
 const partTripleRowStyle: CSSProperties = {
   display: 'flex',

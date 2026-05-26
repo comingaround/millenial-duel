@@ -73,8 +73,22 @@ export function createPartMesh(
       console.warn(`[creator] clone part ${part.id} created without sourceModel; using sphere placeholder`)
       return createPrimitivePart(scene, { ...part, shape: 'sphere' }, customModel)
     }
+    // Group of non-skinned props (e.g. multi-primitive sword) — children
+    // share one TransformNode under the bone, so one transform/color
+    // affects all sub-meshes.
+    if (part.groupMeshNames && part.groupMeshNames.length > 0) {
+      return createPropGroupClonePart(scene, part, customModel, sourceModel)
+    }
+    // Prop clone (single non-skinned mesh) — sourceMeshName identifies
+    // which mesh in source to duplicate, with boneName as the attachment
+    // point on Custom.
+    if (part.sourceMeshName) return createPropClonePart(scene, part, customModel, sourceModel)
+    // Skinned bone clone — extract triangles owned by part.boneName.
     return createClonePart(scene, part, customModel, sourceModel)
   }
+  // Legacy primitives (sphere/box/cylinder/capsule) — keep rendering path
+  // so older library.json entries still work, but the UI no longer offers
+  // them as new options.
   return createPrimitivePart(scene, part, customModel)
 }
 
@@ -160,6 +174,150 @@ function createClonePart(
   return wrapWithMaterial(scene, mesh, part)
 }
 
+// Clone a NON-skinned source mesh (sword, shield, etc) by name. Copies
+// the vertex data + material colour, parents the new mesh to the same
+// bone on Custom via the linkedTransformNode (which is the correct API
+// for static meshes — unlike skinned clones, which need attachToBone).
+// Source local transform (position/rotation/scaling relative to its bone
+// parent) is copied so the clone sits where the source did.
+function createPropClonePart(
+  scene: Scene,
+  part: CreatorPart,
+  customModel: ModelInstance,
+  sourceModel: ModelInstance,
+): CreatorPartInstance {
+  const sourceMesh = sourceModel.glbMeshes.find(
+    (m) => m instanceof Mesh && m.name === part.sourceMeshName && m.getTotalVertices() > 0,
+  ) as Mesh | undefined
+  if (!sourceMesh) {
+    console.warn(`[creator] prop '${part.sourceMeshName}' not found on ${sourceModel.name}; using sphere placeholder`)
+    return placeholderClone(scene, part, customModel)
+  }
+  const parentNode = findLinkedNode(customModel, part.boneName)
+  if (!parentNode) {
+    console.warn(`[creator] bone '${part.boneName}' missing on Custom; using sphere placeholder`)
+    return placeholderClone(scene, part, customModel)
+  }
+
+  // Pull geometry. VertexData.ExtractFromMesh gives positions, normals,
+  // indices (and uvs/colors if present) without copying the source.
+  const sourceVData = VertexData.ExtractFromMesh(sourceMesh, /* copy */ true)
+  const mesh = new Mesh(`creator_prop_${part.id}`, scene)
+  sourceVData.applyToMesh(mesh)
+  mesh.refreshBoundingInfo()
+  mesh.alwaysSelectAsActiveMesh = true
+  mesh.isPickable = false
+  mesh.renderingGroupId = 0
+  mesh.metadata = { creatorPartId: part.id }
+  mesh.parent = parentNode
+
+  // Copy the source mesh's LOCAL transform — that's what positions it
+  // correctly relative to the bone (sword tip away from hand, etc).
+  mesh.position.copyFrom(sourceMesh.position)
+  if (sourceMesh.rotationQuaternion) {
+    mesh.rotationQuaternion = sourceMesh.rotationQuaternion.clone()
+  } else {
+    mesh.rotation.copyFrom(sourceMesh.rotation)
+  }
+  mesh.scaling.copyFrom(sourceMesh.scaling)
+  // Apply user adjustments ON TOP via offset/rotation Euler (deg) /
+  // scale multiplier. For props, this lets users nudge the cloned sword
+  // forward or rescale without losing the canonical "in hand" placement.
+  mesh.position.addInPlaceFromFloats(part.offset[0], part.offset[1], part.offset[2])
+  mesh.scaling.multiplyInPlace(new Vector3(part.scale[0], part.scale[1], part.scale[2]))
+  if (part.rotation[0] || part.rotation[1] || part.rotation[2]) {
+    const userRot = Vector3.FromArray([part.rotation[0], part.rotation[1], part.rotation[2]]).scale(DEG2RAD)
+    if (mesh.rotationQuaternion) {
+      // Add user delta as an Euler post-rotation
+      mesh.rotation.copyFrom(userRot)
+      mesh.rotationQuaternion = null  // fall back to Euler — Babylon uses whichever is set
+    } else {
+      mesh.rotation.copyFromFloats(userRot.x, userRot.y, userRot.z)
+    }
+  }
+
+  console.log(`[creator] prop clone '${part.sourceMeshName}' → bone '${part.boneName}': ${sourceVData.positions ? (sourceVData.positions.length / 3) : 0} verts`)
+  return wrapWithMaterial(scene, mesh, part)
+}
+
+// Group prop clone: ONE TransformNode under the target bone + N child
+// meshes (one per source mesh name in groupMeshNames) nested under it.
+// The group root is what carries the user's scale/offset/rotation, so
+// editing transforms moves all children together. Color edits write to
+// EVERY child's material so the group has a single shared colour.
+function createPropGroupClonePart(
+  scene: Scene,
+  part: CreatorPart,
+  customModel: ModelInstance,
+  sourceModel: ModelInstance,
+): CreatorPartInstance {
+  const parentNode = findLinkedNode(customModel, part.boneName)
+  if (!parentNode) {
+    console.warn(`[creator] bone '${part.boneName}' missing on Custom; group placeholder`)
+    return placeholderClone(scene, part, customModel)
+  }
+  // The group "mesh" — a 0-vertex Mesh used purely as a TransformNode.
+  // Easier than a TransformNode because Babylon's parent-typing works
+  // the same and disposal cleans up cleanly.
+  const groupRoot = new Mesh(`creator_group_${part.id}`, scene)
+  groupRoot.parent = parentNode
+  groupRoot.metadata = { creatorPartId: part.id }
+
+  const children: Array<{ mesh: Mesh; material: StandardMaterial }> = []
+  for (const childName of part.groupMeshNames!) {
+    const src = sourceModel.glbMeshes.find(
+      (m) => m instanceof Mesh && m.name === childName && m.getTotalVertices() > 0,
+    ) as Mesh | undefined
+    if (!src) {
+      console.warn(`[creator] group child '${childName}' not found; skipped`)
+      continue
+    }
+    const vdata = VertexData.ExtractFromMesh(src, true)
+    const child = new Mesh(`creator_group_${part.id}_${childName}`, scene)
+    vdata.applyToMesh(child)
+    child.refreshBoundingInfo()
+    child.alwaysSelectAsActiveMesh = true
+    child.isPickable = false
+    child.renderingGroupId = 0
+    child.parent = groupRoot
+    // Copy source local transform so each child sits in its correct
+    // place relative to the group root (which itself sits at the bone).
+    child.position.copyFrom(src.position)
+    if (src.rotationQuaternion) child.rotationQuaternion = src.rotationQuaternion.clone()
+    else child.rotation.copyFrom(src.rotation)
+    child.scaling.copyFrom(src.scaling)
+
+    const mat = new StandardMaterial(`creator_mat_${part.id}_${childName}`, scene)
+    applyColor(mat, part.color)
+    mat.specularColor = new Color3(0.10, 0.10, 0.12)
+    mat.backFaceCulling = false
+    child.material = mat
+    children.push({ mesh: child, material: mat })
+  }
+  if (children.length === 0) {
+    groupRoot.dispose()
+    console.warn(`[creator] group '${part.id}' had no resolvable children; using placeholder`)
+    return placeholderClone(scene, part, customModel)
+  }
+
+  // Apply user's group-level transform on top.
+  groupRoot.position.copyFromFloats(part.offset[0], part.offset[1], part.offset[2])
+  groupRoot.scaling.copyFromFloats(part.scale[0], part.scale[1], part.scale[2])
+  groupRoot.rotation.copyFromFloats(
+    part.rotation[0] * DEG2RAD,
+    part.rotation[1] * DEG2RAD,
+    part.rotation[2] * DEG2RAD,
+  )
+
+  console.log(`[creator] group clone (${children.length} children) → bone '${part.boneName}'`)
+  return {
+    data: { ...part },
+    mesh: groupRoot,
+    material: children[0].material,
+    groupChildren: children,
+  }
+}
+
 function placeholderClone(scene: Scene, part: CreatorPart, customModel: ModelInstance): CreatorPartInstance {
   // Render a small grey sphere on the target bone but keep shape='clone'
   // in the persisted data — user can re-point the bone and re-extract.
@@ -203,16 +361,39 @@ export function updatePartMesh(
     const newParent = findLinkedNode(customModel, patch.boneName)
     if (newParent) inst.mesh.parent = newParent
   }
+  // For single prop clones, ANY transform change rebuilds the mesh so
+  // we re-apply the source mesh's local pose + user adjustments cleanly.
+  // Group clones edit the group root directly (cheaper than rebuild).
+  if (next.sourceMeshName && !next.groupMeshNames && (patch.scale || patch.offset || patch.rotation)) {
+    disposePartMesh(inst)
+    return createPartMesh(scene, next, customModel, sourceModel)
+  }
   const needsTransform = !!patch.scale || !!patch.offset || !!patch.rotation || !!patch.boneName
   if (needsTransform) {
-    if (next.shape === 'clone') {
+    if (next.groupMeshNames) {
+      // Group root carries the user transform — children stay at their
+      // copied source-local poses, so the group rotates/scales as one.
+      inst.mesh.position.copyFromFloats(next.offset[0], next.offset[1], next.offset[2])
+      inst.mesh.scaling.copyFromFloats(next.scale[0], next.scale[1], next.scale[2])
+      inst.mesh.rotation.copyFromFloats(
+        next.rotation[0] * DEG2RAD,
+        next.rotation[1] * DEG2RAD,
+        next.rotation[2] * DEG2RAD,
+      )
+    } else if (next.shape === 'clone') {
       applyCloneTransform(inst.mesh, next.scale, next.offset, next.rotation)
     } else {
       const parent = inst.mesh.parent as TransformNode | null
       if (parent) applyPrimitiveTransform(inst.mesh, parent, next.scale, next.offset, next.rotation)
     }
   }
-  if (patch.color) applyColor(inst.material, patch.color)
+  if (patch.color) {
+    if (inst.groupChildren) {
+      for (const c of inst.groupChildren) applyColor(c.material, patch.color)
+    } else {
+      applyColor(inst.material, patch.color)
+    }
+  }
   inst.data = next
   return inst
 }
@@ -257,14 +438,27 @@ function applyCloneTransform(
 // copy those vertices transformed into bone-local-skeleton space by
 // bone.getAbsoluteInverseBindMatrix() (canonical Babylon skinning math).
 // Returns null if no triangles qualify.
+//
+// Triangle ownership: each triangle is assigned to the bone with the
+// HIGHEST cumulative weight across its 3 vertices ("centroid bone"). A
+// triangle is included in this clone ONLY when this clone's bone wins.
+// Clean partition — every triangle is owned by exactly one bone, no
+// overlap between adjacent clones (no Z-fighting at hip↔leg seams).
+//
+// Normals: copied from the source mesh's vertex normals (transformed by
+// invBind as directions) so adjacent clones share identical normals at
+// the seam — no shading crease at joints. Falls back to ComputeNormals
+// only if the source GLB doesn't ship vertex normals.
 function extractBoneGeometry(
   source: ModelInstance,
   boneName: string,
 ): { positions: Float32Array; indices: number[]; normals: number[] } | null {
   const outPositions: number[] = []
   const outIndices: number[] = []
+  const outNormals: number[] = []
   let nextIdx = 0
   let totalTris = 0
+  let normalsAvailable = true
 
   for (const m of source.glbMeshes) {
     if (!(m instanceof Mesh)) continue
@@ -278,40 +472,59 @@ function extractBoneGeometry(
     const invBind = bone.getAbsoluteInverseBindMatrix()
 
     const positions = m.getVerticesData(VertexBuffer.PositionKind)
+    const normalsSrc = m.getVerticesData(VertexBuffer.NormalKind)
     const mIdx = m.getVerticesData(VertexBuffer.MatricesIndicesKind)
     const mWts = m.getVerticesData(VertexBuffer.MatricesWeightsKind)
     const indices = m.getIndices()
     if (!positions || !mIdx || !mWts || !indices) continue
-
-    const vCount = positions.length / 3
-    const VERT_WEIGHT_THRESHOLD = 0.30
-    const belongs = new Uint8Array(vCount)
-    for (let v = 0; v < vCount; v++) {
-      for (let k = 0; k < 4; k++) {
-        if (mIdx[v * 4 + k] === boneIdx && mWts[v * 4 + k] >= VERT_WEIGHT_THRESHOLD) {
-          belongs[v] = 1
-          break
-        }
-      }
-    }
+    if (!normalsSrc) normalsAvailable = false
 
     const localMap = new Map<number, number>()
     const triCount = (indices.length / 3) | 0
     const v = new Vector3()
+    const n = new Vector3()
+    // Reused tally for triangle's bone-weight sum. Map keyed by bone index.
+    const tally = new Map<number, number>()
     for (let t = 0; t < triCount; t++) {
       const i0 = indices[t * 3]
       const i1 = indices[t * 3 + 1]
       const i2 = indices[t * 3 + 2]
-      if (!belongs[i0] && !belongs[i1] && !belongs[i2]) continue
+      // Sum bone weights across the triangle's 3 vertices.
+      tally.clear()
+      for (const vi of [i0, i1, i2] as const) {
+        for (let k = 0; k < 4; k++) {
+          const bi = mIdx[vi * 4 + k]
+          const w = mWts[vi * 4 + k]
+          if (w <= 0) continue
+          tally.set(bi, (tally.get(bi) ?? 0) + w)
+        }
+      }
+      // Pick the bone with the largest cumulative weight.
+      let bestBone = -1
+      let bestSum = -1
+      for (const [bi, s] of tally) {
+        if (s > bestSum) {
+          bestSum = s
+          bestBone = bi
+        }
+      }
+      if (bestBone !== boneIdx) continue
       totalTris++
       for (const oi of [i0, i1, i2] as const) {
         let ni = localMap.get(oi)
         if (ni === undefined) {
           v.copyFromFloats(positions[oi * 3], positions[oi * 3 + 1], positions[oi * 3 + 2])
-          const transformed = Vector3.TransformCoordinates(v, invBind)
+          const vt = Vector3.TransformCoordinates(v, invBind)
           ni = nextIdx++
           localMap.set(oi, ni)
-          outPositions.push(transformed.x, transformed.y, transformed.z)
+          outPositions.push(vt.x, vt.y, vt.z)
+          if (normalsSrc) {
+            n.copyFromFloats(normalsSrc[oi * 3], normalsSrc[oi * 3 + 1], normalsSrc[oi * 3 + 2])
+            // TransformNormal ignores translation — correct for direction vectors.
+            const nt = Vector3.TransformNormal(n, invBind)
+            nt.normalize()
+            outNormals.push(nt.x, nt.y, nt.z)
+          }
         }
         outIndices.push(ni)
       }
@@ -321,8 +534,13 @@ function extractBoneGeometry(
   console.log(`[creator] clone '${boneName}': extracted ${totalTris} triangles, ${outPositions.length / 3} vertices`)
   if (totalTris === 0) return null
   const positionsArr = new Float32Array(outPositions)
-  const normals: number[] = []
-  VertexData.ComputeNormals(positionsArr, outIndices, normals)
+  let normals: number[]
+  if (normalsAvailable && outNormals.length === outPositions.length) {
+    normals = outNormals
+  } else {
+    normals = []
+    VertexData.ComputeNormals(positionsArr, outIndices, normals)
+  }
   return { positions: positionsArr, indices: outIndices, normals }
 }
 
@@ -347,10 +565,19 @@ function findLinkedNode(model: ModelInstance, boneName: string): TransformNode |
 }
 
 // Dispose mesh + material. Critical — each part has its own material
-// (not in matCache) so it MUST be disposed alongside the mesh.
+// (not in matCache) so it MUST be disposed alongside the mesh. For group
+// parts, dispose every child + its material before the group root.
 export function disposePartMesh(inst: CreatorPartInstance): void {
+  if (inst.groupChildren) {
+    for (const c of inst.groupChildren) {
+      c.mesh.dispose()
+      c.material.dispose()
+    }
+  }
   inst.mesh.dispose()
-  inst.material.dispose()
+  // The primary material reference for groups points at the first child's
+  // material (already disposed in the loop above). Safe-dispose: idempotent.
+  if (!inst.groupChildren) inst.material.dispose()
 }
 
 function applyColor(mat: StandardMaterial, hex: string): void {

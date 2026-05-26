@@ -271,6 +271,7 @@ export function createEngine(
     // observer) can detect changes and persist. Pull-based (no events).
     let creatorPartsRev = 0
     const creatorPartsListeners: Array<() => void> = []
+    const modelsChangeListeners: Array<() => void> = []
     const bumpCreatorParts = () => {
       creatorPartsRev++
       for (const l of creatorPartsListeners) l()
@@ -831,6 +832,37 @@ export function createEngine(
       // --- Multi-model management ---
       getModels: () => ed.models.map((m) => m.name),
       getActiveModelIndex: () => activeIdx,
+      // Spawn another knight instance at runtime. Positions it 1.5m to the
+      // right of the current rightmost model. Returns the new index, which
+      // becomes the active model so the user can move it via the BODY
+      // POSITION editor right away. Listeners fire so the React panel
+      // refreshes the models list + visibilities.
+      addModel: async (opts?: { hideAllMeshes?: boolean; name?: string }) => {
+        const rightmost = ed.models.reduce(
+          (a, b) => (b.position.x > a.position.x ? b : a),
+          ed.models[0],
+        )
+        const pos = new Vector3(rightmost.position.x + 1.5, 0, 0)
+        const yRot = rightmost ? -Math.PI / 2 : 0
+        const name = opts?.name ?? `Model ${ed.models.length + 1}`
+        const newIdx = await ed.addModel(name, pos, yRot, opts?.hideAllMeshes ?? false)
+        for (const fn of modelsChangeListeners) fn()
+        return newIdx
+      },
+      // Move active model's spawn anchor + snap root to it. Used by the
+      // editable BODY POSITION fields so each model can spawn anywhere.
+      setBodyPosition: (x: number, y: number, z: number) => {
+        const m = active()
+        m.position.copyFromFloats(x, y, z)
+        m.root.position.copyFrom(m.position)
+      },
+      addModelsChangeListener: (fn: () => void) => {
+        modelsChangeListeners.push(fn)
+        return () => {
+          const i = modelsChangeListeners.indexOf(fn)
+          if (i >= 0) modelsChangeListeners.splice(i, 1)
+        }
+      },
       setActiveModel: (idx: number) => {
         if (idx < 0 || idx >= ed.models.length || idx === activeIdx) return
         activeIdx = idx
@@ -869,6 +901,123 @@ export function createEngine(
         if (!customModel.skeleton.bones.find((b) => b.name === boneName)) return null
         const part = defaultPartFor(boneName, shape)
         const inst = createPartMesh(scene, part, customModel, ed.models[0])
+        customModel.creatorParts.set(part.id, inst)
+        bumpCreatorParts()
+        return part.id
+      },
+
+      // Add a prop clone (non-skinned mesh — sword, shield, etc.) by source
+      // mesh name. Engine auto-resolves the attachment bone by walking the
+      // source mesh's parent chain to find the nearest bone TransformNode.
+      addCreatorPropClone: (sourceMeshName: string): string | null => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return null
+        const customModel = ed.models[customIdx]
+        const sourceModel = ed.models[0]
+        // Find the source mesh
+        const srcMesh = sourceModel.glbMeshes.find(
+          (m: any) => m.name === sourceMeshName && m.getTotalVertices?.() > 0,
+        )
+        if (!srcMesh) {
+          console.warn(`[creator] prop '${sourceMeshName}' not found on source model`)
+          return null
+        }
+        // Walk parent chain to find a bone-linked TransformNode.
+        const boneLinkedNodes = new Map<any, string>()
+        for (const b of sourceModel.skeleton.bones) {
+          if (b._linkedTransformNode) boneLinkedNodes.set(b._linkedTransformNode, b.name)
+        }
+        let cursor: any = srcMesh.parent
+        let boneName: string | null = null
+        while (cursor) {
+          if (boneLinkedNodes.has(cursor)) {
+            boneName = boneLinkedNodes.get(cursor)!
+            break
+          }
+          cursor = cursor.parent
+        }
+        if (!boneName) {
+          console.warn(`[creator] prop '${sourceMeshName}' has no bone ancestor`)
+          return null
+        }
+        const part = defaultPartFor(boneName, 'clone' as CreatorShape)
+        part.sourceMeshName = sourceMeshName
+        const inst = createPartMesh(scene, part, customModel, sourceModel)
+        customModel.creatorParts.set(part.id, inst)
+        bumpCreatorParts()
+        return part.id
+      },
+
+      // Enumerate available clone targets — all bones + non-skinned
+      // renderable prop meshes. Props are grouped by name stem so a
+      // multi-primitive prop ("Sword_primitive0", "..1", "..2", "..3")
+      // surfaces as one entry "Sword" that clones the whole group. UI
+      // distinguishes via `members` count.
+      getCreatorTargets: (): { bones: string[]; props: Array<{ stem: string; members: string[] }> } => {
+        const sourceModel = ed.models[0]
+        const bones = sourceModel.skeleton.bones.map((b) => b.name)
+        // Collect all non-skinned, renderable, non-root meshes.
+        const raw: string[] = []
+        const seen = new Set<string>()
+        for (const m of sourceModel.glbMeshes as any[]) {
+          if (!m || m.skeleton) continue
+          if (!m.getTotalVertices || m.getTotalVertices() === 0) continue
+          if (m.name === '__root__' || m.name === 'Armature') continue
+          if (seen.has(m.name)) continue
+          seen.add(m.name)
+          raw.push(m.name)
+        }
+        // Group by stem. Babylon's GLB loader names multi-material
+        // primitives "<stem>_primitive<N>" — split on that. For meshes
+        // without the suffix, the stem IS the name (single-primitive prop).
+        const byStem = new Map<string, string[]>()
+        for (const name of raw) {
+          const m = name.match(/^(.*)_primitive\d+$/)
+          const stem = m ? m[1] : name
+          if (!byStem.has(stem)) byStem.set(stem, [])
+          byStem.get(stem)!.push(name)
+        }
+        const props = Array.from(byStem.entries()).map(([stem, members]) => ({ stem, members }))
+        return { bones, props }
+      },
+
+      // Add a multi-primitive prop as ONE group part. All children share
+      // the group root's transform — rotating/scaling moves them together.
+      // Bone is auto-resolved from the first child's parent chain.
+      addCreatorPropGroupClone: (stem: string, memberNames: string[]): string | null => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return null
+        const customModel = ed.models[customIdx]
+        const sourceModel = ed.models[0]
+        if (memberNames.length === 0) return null
+        // Resolve bone from first child (all members share a parent in
+        // a well-formed GLB; if they don't, the first one anchors).
+        const first = sourceModel.glbMeshes.find(
+          (m: any) => m.name === memberNames[0] && m.getTotalVertices?.() > 0,
+        )
+        if (!first) return null
+        const boneLinkedNodes = new Map<any, string>()
+        for (const b of sourceModel.skeleton.bones) {
+          if (b._linkedTransformNode) boneLinkedNodes.set(b._linkedTransformNode, b.name)
+        }
+        let cursor: any = first.parent
+        let boneName: string | null = null
+        while (cursor) {
+          if (boneLinkedNodes.has(cursor)) {
+            boneName = boneLinkedNodes.get(cursor)!
+            break
+          }
+          cursor = cursor.parent
+        }
+        if (!boneName) {
+          console.warn(`[creator] prop group '${stem}' has no bone ancestor`)
+          return null
+        }
+        const part = defaultPartFor(boneName, 'clone' as CreatorShape)
+        part.groupMeshNames = memberNames
+        // Store the stem in sourceMeshName too so the UI can label it.
+        part.sourceMeshName = stem
+        const inst = createPartMesh(scene, part, customModel, sourceModel)
         customModel.creatorParts.set(part.id, inst)
         bumpCreatorParts()
         return part.id

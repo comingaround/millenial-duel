@@ -13,7 +13,8 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 - ✅ Custom **pose/animation editor** at scene `(50, 0, 0)` — separate knight rig used purely as a posing puppet
 - ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips X/Y/Z TRANSLATE stepper with leg-plant IK (feet stay glued to their world positions while body shifts)**, editable typed input + scroll-wheel + ± buttons, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, **Initial Position virtual pose** (top of Poses list, system, can't delete), virtual Initial Position anchor, rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, **animations can pick an Initial Pose** that the model snaps to before keyframes play, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
 - ✅ **Three-model editor** — Model 1 + Model 2 + Custom along X axis at (50,0,0), (51.5,0,0), (53.0,0,0). Custom is skeleton-only (all GLB meshes hidden via `isVisible = false` flagged on load by `loadKnightInstance(..., hideAllMeshes=true)`) — user builds the body part-by-part via the Creator tab. Active-model selector in left dash routes all bone-control / anim-preview to the selected one. Each model row has ✎ edit (rename + visibility toggle).
-- ✅ **Character Creator tab** (right panel, third tab alongside Bones + Style) — only operational when active model is Custom (idx 2). Adds primitive shapes (sphere/box/cylinder/capsule) OR `clone` (exact mesh extraction from Model 1) onto any ACTIVE_BONE. Stepper-based editing (size/offset/rotation in cm + degrees + colour picker per part). Bone-retarget dropdown on each part. Persists to library.json. See "Character Creator" section below.
+- ✅ **Character Creator tab** (right panel, third tab alongside Bones + Style) — only operational when active model is Custom (idx 2). **Clone-only** (May 26): body bones (skinned extraction via `getAbsoluteInverseBindMatrix()` + `attachToBone()`) and props (sword + shield + future). Multi-primitive props auto-grouped into one TransformNode so a 4-piece sword rotates as one. Procedural primitives (sphere/box/cylinder/capsule) dropped from the Add UI but legacy parts still render. Add-target dropdown is 3-level nested (Category › Subcategory › Item) — Bones (Torso/L Arm/R Arm/L Leg/R Leg) + Weapons (Sword/Shield/Other). Per-part accordion: header (kind + bone select) always visible, body (size/offset/rotation/color steppers) collapses. Persists to library.json (`groupMeshNames`, `sourceMeshName` ride through).
+- ✅ **Multi-model spawn ergonomics (May 26)** — `+` button on the Models section header spawns a fresh visible knight 1.5m to the right of the rightmost model. `👁`/`🚫` toggle on each model row hides/shows in-place (no edit modal). BODY POSITION (world) is now editable — typing X/Y/Z updates both `model.position` (spawn anchor) and `model.root.position`, so each model can spawn anywhere. Reset goes back to the edited spawn position.
 - ✅ **Sync Play** — assign one anim per model and fire both simultaneously (`▶ Play both`) for combat practice / timing verification. Section sits above Animations in left dash.
 - ✅ **Two reset buttons** in right panel — Reset current model / Reset all models.
 - ✅ **Inverse Kinematics on 5 bones** — 2-bone analytical IK shared across paths. **Hips** → both legs adapt so feet stay planted (crouch / lean / weight shift). **Hand.L / Hand.R** → arm IK reaches new hand world position (sword placement, reaches). **Foot.L / Foot.R** → leg IK reaches new foot world position (kick prep, lifting steps). All five share the same solver; pole hints differ. See "IK system" section below for the Babylon gotchas — lots of them.
@@ -494,6 +495,31 @@ The Vite dev plugin (`vite-plugins/animation-saver.ts`) writes the payload verba
 
 - The Add row had a shape select + bone select + Add button competing for ~240px of panel width. Long bone names like "Upper Leg.L" exceed a 88px-fixed select. Final layout: selects are `flex: 1 1 80px` (share remaining space, shrink past content via `min-width: 0`), button is `flex: 0 0 auto` (fixed, never gets pushed off), row is `flex-wrap: wrap` (drops button to second line on extreme narrow widths). Same pattern for PartRow header.
 
+### Props + grouping (May 26)
+
+- Sword/shield are **non-skinned static meshes** parented under bone TransformNodes in the GLB. The skinned-clone path (inverse bind + attachToBone) doesn't pick them up — they need a different path: direct `mesh.parent = boneLinkedNode` + copy local transform from source. `createPropClonePart()` handles single-mesh props; `createPropGroupClonePart()` handles multi-primitive groups.
+- **Group parts**: a group is a 0-vertex `Mesh` parented to the bone, with N child meshes (one per source primitive) nested under it. The group root carries the user's scale/offset/rotation — children stay at their copied source-local poses, so the group transforms as one rigid body. Color updates loop through every child's material.
+- **`CreatorPartInstance.groupChildren`** array holds `{mesh, material}` pairs for disposal + color application. Without it, dispose would leak the child materials (each owns its own — not shared via matCache).
+- **Stem detection** for grouping: the GLB loader names multi-material primitives `<stem>_primitive<N>`. `getCreatorTargets()` regexes that suffix and groups primitives by stem. Single-primitive props pass through as flat clones.
+- **Schema additions on `CreatorPart`** for the prop path: `sourceMeshName?: string` (single prop OR group label) and `groupMeshNames?: string[]` (the actual child mesh names — only set on groups). Persistence is unchanged: all fields ride through library.json.
+- **Auto-bone resolution for props**: when the user picks a prop from the dropdown, the engine walks the source mesh's `parent` chain to find the closest bone-linked TransformNode, sets `part.boneName` to that bone, and attaches the clone to the same-named bone on Custom. User never needs to know which bone holds the sword.
+
+### Categorised target dropdown (May 26)
+
+- Native `<select>` doesn't support nested `<optgroup>`, and optgroup labels are styled by the OS (invisible on dark dropdowns). Workaround: build a 3-level visual hierarchy from regular `<option>` rows with 3 styles:
+  - **Category** (`▸ Bones`, `▸ Weapons`) — disabled, bold, brightest grey on `#0a0c0f`.
+  - **Subcategory** (`   ▸ Torso`, `   ▸ Sword`) — disabled, medium weight, slightly lighter background.
+  - **Item** — selectable, full white on `#1c1f24`, prefixed with 8 unicode spaces for visual indent.
+- Bone subcategories come from the existing `categorize()` helper (Torso / Left Arm / Right Arm / Left Leg / Right Leg / IK Helpers / Other). Empty groups are filtered out.
+- Weapon subcategories are keyword-matched on stem (`/sword/i`, `/shield/i`, else "Other"). Add `axe`, `bow`, etc by extending the `weaponSubcats` array.
+- Dropdown shows only **ACTIVE_BONES** (19 combat-relevant bones), not the full 35-bone rig — fingers/toes/IK helpers aren't useful clone targets.
+
+### PartRow accordion (May 26)
+
+- Each part has a chevron `▶`/`▼` header that toggles a body panel. Default collapsed so many parts (a built-up Custom model) stays scannable.
+- Two visible-always rows: (1) chevron + title (prop name or shape) + delete `×`, and (2) `bone` label + bone-retarget dropdown. Body has size/offset/rotation/color when expanded.
+- Title truncates with ellipsis when long. Click chevron OR title to toggle. Local React state (not persisted) — opens collapsed on tab entry.
+
 ## Asset pipeline (FBX → GLB)
 
 All character/building/tree models came as FBX or OBJ from CGTrader. We convert to GLB at scaffold time:
@@ -582,6 +608,28 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - WASD free-roam locomotion in FP mode — input-driven `root.position` translation + walk-cycle anim on top (decoupled from the per-keyframe-displacement system, which is for discrete moves)
 - Mouse-look for hero in Locked camera (currently click-drag)
 - Production-safe persistence (current `/api/animations` is dev-only Vite middleware)
+
+## Lessons captured (Creator polish + props + grouping session, 2026-05-26 evening)
+
+D1. **Native `<select>` is the wrong tool when you need nested categories with theme-aware styling.** `<optgroup>` doesn't nest, and its label is rendered by the OS — invisible on dark dropdowns in every browser tested. Workaround: build the hierarchy from regular `<option>` rows with 3 styles (category / subcategory / item) + unicode-space indentation. Works on every browser/OS pair without a custom dropdown component. If you ever need real hover states / icons / search, that's when you commit to a custom dropdown.
+
+D2. **GLB props (sword/shield) are non-skinned meshes parented under bone TransformNodes.** The skinned-clone path (`getAbsoluteInverseBindMatrix()` + `attachToBone()`) silently produces zero triangles for them. Need a separate path: copy mesh's vertex data, parent the clone to the same bone's `_linkedTransformNode`, copy the source mesh's local position/rotation/scaling. Engine auto-resolves the bone by walking the source mesh's parent chain — user never has to know which bone holds the sword.
+
+D3. **Multi-primitive props need a group root.** A sword exported as `Sword_primitive0..3` (4 materials) lands as 4 separate Meshes in Babylon. To rotate / scale / colour them as one unit: create a 0-vertex Mesh under the bone, parent all 4 children to it, and apply user transforms to the root. Children keep their source-local poses → group transforms rigidly. `CreatorPartInstance.groupChildren` tracks the array for disposal + color application.
+
+D4. **Stem-grouping for GLB primitives is regex-trivial.** Babylon's loader names multi-material primitives `<stem>_primitive<N>`. One `match(/^(.*)_primitive\d+$/)` + Map-by-stem gives clean prop groups in `getCreatorTargets()`. Single-primitive props fall through unchanged (stem = full name, members = [name]).
+
+D5. **Accordion-by-default on long lists.** When the user can accumulate dozens of parts (one per body bone + props), the right panel becomes unscrollable text. Collapse each PartRow body by default, keep header (title + bone selector) always visible — they can scan + retarget bones without expanding. Each row's expand state is local React (not persisted) — opens collapsed on every tab entry, matching the "1-click to engage" UX rule.
+
+D6. **Header layout: stack ≫ inline when content is variable.** First Creator add row had shape + bone + button on one line and looked cramped + sometimes pushed the button off. Stacking the bone selector below the title in PartRow (row 1: title + delete; row 2: bone selector) fixed the cramp AND made the row scannable when collapsed. Inline is fine for fixed-width content; stack when one of the items can grow (like long bone names).
+
+D7. **3-level dropdown nesting in native `<select>` via leading spaces.** ` ` (regular) and ` ` (non-breaking) both render in option text. Three indents = `'        '` (8 spaces). Reads as a tree on every browser. Limitation: items can't be styled differently by depth in the dropdown panel (browser renders all options identically except for the disabled background) — but the 3-style trick using bg + colour on disabled rows gives enough hierarchy.
+
+D8. **Right panel needs vertical space allocation discipline.** The CameraToggle pill sits at `right: 20; bottom: 20`. If the BoneControls panel uses `bottom: 0`, it covers the toggle on every interaction. Always reserve ~70-80px at bottom for floating widgets. Outer panel `overflow: hidden` + inner sections each owning their own `overflowY: auto` is the right scroll pattern — double scrollbars (outer + inner) confuse users.
+
+D9. **Engine APIs > React state for runtime entities.** Creator parts, models, etc. live on the engine because they're 3D Babylon objects. React state is just a mirror. Pattern: engine exposes `addX/getX/setX/addXListener`. React subscribes via `useEffect` + sets a tick counter on every event. The save effect lists the tick counter as a dep, so any mutation triggers the debounced POST. Zero double-source-of-truth bugs.
+
+D10. **Editable read-outs need focus-aware draft state.** `BodyPosInput` (and `PartNumInput`) hold a local string `text` state that syncs from prop value ONLY when not focused. Without this, the per-frame rAF polling overwrites what the user is typing. Commit on blur OR Enter; revert on Escape. Reusable pattern for any "display + edit" cell.
 
 ## Lessons captured (Character Creator session, 2026-05-26)
 

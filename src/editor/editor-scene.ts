@@ -87,20 +87,35 @@ const FALLBACK = new Color3(0.55, 0.55, 0.55)
 export type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule' | 'clone'
 export type CreatorPart = {
   id: string
-  boneName: string
+  boneName: string                   // bone the part is attached to on Custom
   shape: CreatorShape
   scale: [number, number, number]    // dimensions in metres (in bone-local frame)
   offset: [number, number, number]   // local position relative to bone
   rotation: [number, number, number] // Euler degrees (X, Y, Z)
   color: string                      // hex #rrggbb
+  // When set, this part clones a NON-skinned prop mesh (e.g. sword,
+  // shield) from the source model by name, rather than extracting
+  // skinned geometry by bone. boneName is still required — used as the
+  // attachment point on Custom (typically the prop's parent bone in source).
+  sourceMeshName?: string
+  // When set, this part is a GROUP — one TransformNode parented to bone,
+  // with N child meshes (one per listed source-mesh name) nested under it.
+  // Transform/color edits apply to the whole group. Used for multi-primitive
+  // props like a sword (blade + grip + pommel + crossguard).
+  groupMeshNames?: string[]
 }
 
 // Runtime state for one creator part: data + the Babylon objects it owns.
 // Each part owns its own material (NOT shared) so its color is independent.
+//
+// For group parts, `mesh` is a transform-node-shaped Mesh (no geometry) used
+// as the shared parent; `material` is the first child's material. The full
+// child list lives in `groupChildren` so disposal + color updates can iterate.
 export type CreatorPartInstance = {
   data: CreatorPart
   mesh: Mesh
   material: StandardMaterial
+  groupChildren?: Array<{ mesh: Mesh; material: StandardMaterial }>
 }
 
 export type ModelInstance = {
@@ -123,9 +138,12 @@ export type ModelInstance = {
 }
 
 export type EditorSceneApi = {
-  models: ModelInstance[]      // [Model 1, Model 2]
+  models: ModelInstance[]      // [Model 1, Model 2, Custom, …]
   allBoneNames: string[]       // shared (same rig)
   animationGroups: any[]       // baked anims from the first GLB load
+  // Spawn a fresh knight instance at runtime. Used by the "+ Add" button
+  // in the left dashboard. Appends to `models` and returns the new index.
+  addModel: (name: string, position: Vector3, yRotation: number, hideAllMeshes?: boolean) => Promise<number>
 }
 
 async function loadKnightInstance(
@@ -265,7 +283,17 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
       `[editor] loaded 3 knight instances (Model 1 + Model 2 + Custom skeleton) — ${m1.skeleton.bones.length} bones each`,
     )
 
-    return { models: [m1, m2, m3], allBoneNames, animationGroups }
+    const api: EditorSceneApi = {
+      models: [m1, m2, m3],
+      allBoneNames,
+      animationGroups,
+      addModel: async (name, position, yRotation, hideAllMeshes = false) => {
+        const m = await loadKnightInstance(scene, matCache, name, position, yRotation, hideAllMeshes)
+        api.models.push(m)
+        return api.models.length - 1
+      },
+    }
+    return api
   } catch (err) {
     console.error('[editor] load failed', err)
     return null
