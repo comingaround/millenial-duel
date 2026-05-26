@@ -125,8 +125,16 @@ export function createEngine(
   editorCam.fov = 0.9
   editorCam.minZ = 0.05
   editorCam.maxZ = 2000
-  editorCam.lowerRadiusLimit = 1.5
-  editorCam.upperRadiusLimit = 20
+  // Relaxed zoom range — user can fly very close (inspect a single bone)
+  // or pull way back (frame all 3 models + the village). Previously
+  // lowerRadiusLimit = 1.5 felt "stuck at the centre" because wheel-in
+  // hit the cap a quarter-second after starting.
+  editorCam.lowerRadiusLimit = 0.1
+  editorCam.upperRadiusLimit = 500
+  // Beta (vertical orbit) — give the full top-to-bottom range so the
+  // user can look down from above OR up from below.
+  editorCam.lowerBetaLimit = 0.05
+  editorCam.upperBetaLimit = Math.PI - 0.05
   editorCam.wheelDeltaPercentage = 0.05
   editorCam.panningSensibility = 100
 
@@ -272,6 +280,10 @@ export function createEngine(
     let creatorPartsRev = 0
     const creatorPartsListeners: Array<() => void> = []
     const modelsChangeListeners: Array<() => void> = []
+    // Tracks which model the editor camera is currently focused on.
+    // -1 = no explicit focus (initial state, target at the static centre).
+    let focusedModelIdx = -1
+    const focusChangeListeners: Array<() => void> = []
     const bumpCreatorParts = () => {
       creatorPartsRev++
       for (const l of creatorPartsListeners) l()
@@ -861,6 +873,31 @@ export function createEngine(
         return () => {
           const i = modelsChangeListeners.indexOf(fn)
           if (i >= 0) modelsChangeListeners.splice(i, 1)
+        }
+      },
+      // Re-centre the editor camera on a model. Sets the orbit target to
+      // the model's current root position + a chest-height offset (1.0m)
+      // so wheel-zoom converges on the actual model instead of the static
+      // spawn centre between all 3. Keeps current radius + angles so the
+      // user doesn't get visually whipped around.
+      focusModel: (idx: number) => {
+        if (idx < 0 || idx >= ed.models.length) return
+        const m = ed.models[idx]
+        m.root.computeWorldMatrix(true)
+        editorCam.target.copyFromFloats(
+          m.root.position.x,
+          m.root.position.y + 1.0,
+          m.root.position.z,
+        )
+        focusedModelIdx = idx
+        for (const fn of focusChangeListeners) fn()
+      },
+      getFocusedModelIdx: () => focusedModelIdx,
+      addFocusChangeListener: (fn: () => void) => {
+        focusChangeListeners.push(fn)
+        return () => {
+          const i = focusChangeListeners.indexOf(fn)
+          if (i >= 0) focusChangeListeners.splice(i, 1)
         }
       },
       setActiveModel: (idx: number) => {

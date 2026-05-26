@@ -82,6 +82,10 @@ export default function EditorPanel() {
   const [models, setModels] = useState<string[]>([])
   const [modelVisibilities, setModelVisibilities] = useState<Record<number, boolean>>({})
   const [activeModel, setActiveModelState] = useState(0)
+  // Which model the editor camera is currently focused on. -1 = none
+  // (initial state, target is the static centre). Updates via engine
+  // listener so other paths that set focus also light up the icon.
+  const [focusedModel, setFocusedModel] = useState(-1)
   const setActiveModel = (idx: number) => {
     setActiveModelState(idx)
     ;(window as any).__editor?.setActiveModel?.(idx)
@@ -156,6 +160,7 @@ export default function EditorPanel() {
 
     let unsubCreator: (() => void) | null = null
     let unsubModels: (() => void) | null = null
+    let unsubFocus: (() => void) | null = null
     const tryAttach = () => {
       const ed = window.__editor
       if (!ed) return false
@@ -174,6 +179,13 @@ export default function EditorPanel() {
       }) ?? null
       // Re-pull names + visibilities when a model is spawned at runtime.
       unsubModels = (ed as any).addModelsChangeListener?.(pullModels) ?? null
+      // Track camera focus so the per-row 🎯 icon can highlight.
+      const initialFocus = (ed as any).getFocusedModelIdx?.()
+      if (typeof initialFocus === 'number') setFocusedModel(initialFocus)
+      unsubFocus = (ed as any).addFocusChangeListener?.(() => {
+        const i = (ed as any).getFocusedModelIdx?.()
+        if (typeof i === 'number') setFocusedModel(i)
+      }) ?? null
       setEditorReady(true)
       return true
     }
@@ -187,6 +199,7 @@ export default function EditorPanel() {
         unsub?.()
         unsubCreator?.()
         unsubModels?.()
+        unsubFocus?.()
       }
     }
     return () => {
@@ -194,6 +207,7 @@ export default function EditorPanel() {
       unsub?.()
       unsubCreator?.()
       unsubModels?.()
+      unsubFocus?.()
     }
   }, [])
 
@@ -547,12 +561,14 @@ export default function EditorPanel() {
               name={name}
               active={activeModel === idx}
               hidden={modelVisibilities[idx] === false}
+              focused={focusedModel === idx}
               onClick={() => setActiveModel(idx)}
               onToggleHidden={() => {
                 const nextVisible = !(modelVisibilities[idx] !== false)
                 ;(window as any).__editor?.setModelVisible?.(idx, nextVisible)
                 setModelVisibilities((curr) => ({ ...curr, [idx]: nextVisible }))
               }}
+              onFocus={() => (window as any).__editor?.focusModel?.(idx)}
               onEdit={() =>
                 setEditingModel({
                   idx,
@@ -911,13 +927,15 @@ function Empty({ text }: { text: string }) {
 }
 
 function ModelRow({
-  name, active, hidden, onClick, onToggleHidden, onEdit,
+  name, active, hidden, focused, onClick, onToggleHidden, onFocus, onEdit,
 }: {
   name: string
   active: boolean
   hidden: boolean
+  focused: boolean
   onClick: () => void
   onToggleHidden: () => void
+  onFocus: () => void
   onEdit: () => void
 }) {
   return (
@@ -933,6 +951,13 @@ function ModelRow({
         {hidden ? <span style={{ marginLeft: 6, opacity: 0.6, fontSize: 10 }}>(hidden)</span> : null}
       </span>
       {active ? <span style={{ fontSize: 10, opacity: 0.7, marginRight: 4 }}>✓</span> : null}
+      <span
+        style={focused ? focusBtnActiveStyle : penStyle}
+        onClick={onFocus}
+        title={focused ? 'Camera is focused on this model' : 'Focus camera on this model'}
+      >
+        🎯
+      </span>
       <span
         style={penStyle}
         onClick={onToggleHidden}
@@ -1196,6 +1221,20 @@ const penStyle: CSSProperties = {
   marginLeft: 4,
   fontSize: 11,
   padding: '0 4px',
+}
+// 🎯 icon when the camera is locked on this model — full opacity + an
+// orange pill background so it's obvious at a glance which row owns the
+// camera. Other rows show the dim default style.
+const focusBtnActiveStyle: CSSProperties = {
+  opacity: 1,
+  cursor: 'pointer',
+  marginLeft: 4,
+  fontSize: 11,
+  padding: '1px 5px',
+  background: 'rgba(240, 160, 60, 0.6)',
+  border: '1px solid rgba(255, 200, 110, 0.85)',
+  borderRadius: 4,
+  boxShadow: '0 0 4px rgba(240, 160, 60, 0.55)',
 }
 
 const keyBindLabelStyle: CSSProperties = {
