@@ -1296,7 +1296,7 @@
       "color": "#f0c7a8"
     },
     {
-      "id": "part_1779809065700_8tkj",
+      "id": "part_1779810348989_1tp8",
       "boneName": "Hand Hold.R",
       "shape": "clone",
       "scale": [
@@ -1317,7 +1317,7 @@
       "color": "#ffffff",
       "sourceMeshName": "axe_textured",
       "groupMeshNames": [
-        "__preview_axe_textured_0"
+        "Axe"
       ]
     }
   ]

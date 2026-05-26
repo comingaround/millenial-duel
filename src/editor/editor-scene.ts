@@ -11,6 +11,7 @@ import {
   StandardMaterial,
   Vector3,
   VertexBuffer,
+  VertexData,
 } from '@babylonjs/core'
 import { POSITION_BONES } from './pose-store'
 
@@ -305,6 +306,31 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
     // surfaced to the Creator's "Weapons (library)" dropdown.
     const weaponLibrary = await loadWeaponLibrary(scene)
 
+    // Make the axe Model 1's primary weapon — hides its stock sword on
+    // Hand Hold.R and attaches the textured axe at rotation (90, 90, 45)
+    // degrees. Model 2 keeps its sword for combat-sparring contrast.
+    attachWeaponToHand(
+      scene, weaponLibrary, 'axe_textured',
+      m1.glbMeshes, m1.skeleton, 'Hand Hold.R', [90, 90, 45],
+    )
+
+    // ─── DEBUG: render store's native knight GLB next to Custom ───
+    // Side-by-side visual comparison of the native asset-store export vs
+    // our fbx2gltf-converted knight.glb. Place at x=54.5, just past
+    // Custom (x=53). Remove this block once the comparison's done.
+    try {
+      const nativeResult = await SceneLoader.ImportMeshAsync('', '/models/', 'knight_native.glb', scene)
+      const nativeRoot =
+        nativeResult.meshes.find((m) => m.name === '__root__') ?? nativeResult.meshes[0]
+      nativeRoot.name = 'KnightNative'
+      nativeRoot.position = new Vector3(54.5, 0, 0)
+      // Stop any auto-playing animations — we just want a static A/B.
+      nativeResult.animationGroups.forEach((g) => g.stop())
+      console.log(`[editor] DEBUG: native knight GLB loaded next to Custom — ${nativeResult.meshes.length} meshes`)
+    } catch (err) {
+      console.warn('[editor] DEBUG: native knight GLB load failed:', err)
+    }
+
     const api: EditorSceneApi = {
       models: [m1, m2, m3],
       allBoneNames,
@@ -342,7 +368,7 @@ const WEAPON_CATALOGUE: Array<{
   { file: 'axe_textured.glb', stem: 'axe_textured', kind: 'axe', targetMaxDim: 0.6 },
 ]
 
-async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntry[]> {
+export async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntry[]> {
   const library: WeaponLibraryEntry[] = []
   for (const entry of WEAPON_CATALOGUE) {
     try {
@@ -367,19 +393,6 @@ async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntry[]> {
       normalizeWeaponMeshes(meshes, entry.targetMaxDim)
       library.push({ stem: entry.stem, meshes, kind: entry.kind })
       console.log(`[editor] weapon library: '${entry.stem}' (${entry.kind}) — ${meshes.length} mesh(es), normalized to ${entry.targetMaxDim}m`)
-      // ─── DEBUG PREVIEW ───
-      // Render the axe just to the right of the Custom model (x=53) so
-      // the user can eyeball its size before cloning it onto a bone.
-      // Remove this block once they're done evaluating.
-      if (entry.stem === 'axe_textured') {
-        for (let i = 0; i < meshes.length; i++) {
-          const m = meshes[i]
-          m.setEnabled(true)
-          m.position = new Vector3(54.0, 1.0, 0)
-          m.name = `__preview_${entry.stem}_${i}`
-        }
-        console.log(`[editor] DEBUG preview: '${entry.stem}' placed at (54.0, 1.0, 0) — next to Custom`)
-      }
     } catch (err) {
       console.warn(`[editor] failed to load weapon '${entry.stem}':`, err)
     }
@@ -443,4 +456,80 @@ function normalizeWeaponMeshes(meshes: Mesh[], targetMaxDim: number): void {
     m.rotationQuaternion = null
     m.refreshBoundingInfo()
   }
+}
+
+// Attach a weapon-library item to a knight's bone, replacing whatever
+// non-skinned mesh was previously parented to that bone (typically the
+// GLB's stock sword/shield). Used to set the axe as primary weapon on
+// hero + Model 1 — the Creator path still handles user-driven adds.
+//
+// Mirrors the Creator's prop-group-clone math: groupRoot scaling is
+// divided by the parent bone's absolute world scale so the weapon
+// lands at its normalised size regardless of armature scale.
+export function attachWeaponToHand(
+  scene: Scene,
+  library: WeaponLibraryEntry[],
+  stem: string,
+  glbMeshes: AbstractMesh[],
+  skeleton: Skeleton,
+  boneName: string,
+  rotationDeg: [number, number, number],
+): Mesh | null {
+  const entry = library.find((w) => w.stem === stem)
+  if (!entry) {
+    console.warn(`[weapon] '${stem}' not in library`)
+    return null
+  }
+  const bone = skeleton.bones.find((b) => b.name === boneName)
+  const parentNode = bone?._linkedTransformNode
+  if (!parentNode) {
+    console.warn(`[weapon] bone '${boneName}' missing on skeleton`)
+    return null
+  }
+  // Hide any non-skinned mesh parented (directly or via chain) under
+  // this bone — that's the stock sword/shield we're replacing.
+  for (const m of glbMeshes) {
+    if (!(m instanceof Mesh)) continue
+    if (m.skeleton) continue
+    if (m.getTotalVertices() === 0) continue
+    let cursor: any = m.parent
+    while (cursor) {
+      if (cursor === parentNode) {
+        m.setEnabled(false)
+        break
+      }
+      cursor = cursor.parent
+    }
+  }
+  // Build group root + child meshes from the library.
+  const groupRoot = new Mesh(`weapon_${stem}_root`, scene)
+  groupRoot.parent = parentNode
+  for (const src of entry.meshes) {
+    const vdata = VertexData.ExtractFromMesh(src, true)
+    const child = new Mesh(`weapon_${stem}_child`, scene)
+    vdata.applyToMesh(child)
+    child.refreshBoundingInfo()
+    child.alwaysSelectAsActiveMesh = true
+    child.isPickable = false
+    child.renderingGroupId = 0
+    child.parent = groupRoot
+    if (src.material && typeof (src.material as any).clone === 'function') {
+      child.material = (src.material as any).clone(`weapon_mat_${stem}`)
+    }
+  }
+  // Normalised user transform — scale 1.0 = native size of the library
+  // entry (already 0.6m after the loader's normalize step).
+  parentNode.computeWorldMatrix(true)
+  const ws = parentNode.absoluteScaling
+  const sx = Math.abs(ws.x) || 1
+  const sy = Math.abs(ws.y) || 1
+  const sz = Math.abs(ws.z) || 1
+  groupRoot.scaling.copyFromFloats(1 / sx, 1 / sy, 1 / sz)
+  const DEG = Math.PI / 180
+  groupRoot.rotation.copyFromFloats(
+    rotationDeg[0] * DEG,
+    rotationDeg[1] * DEG,
+    rotationDeg[2] * DEG,
+  )
+  return groupRoot
 }

@@ -97,8 +97,10 @@ export default function EditorPanel() {
     visible: boolean
   } | null>(null)
   // Sync-play: which anim to fire on each model when "Play both" is clicked
-  const [syncAnim1, setSyncAnim1] = useState<string>('')
-  const [syncAnim2, setSyncAnim2] = useState<string>('')
+  // One sync-play selection per model (indexed by model idx). Variable
+  // length so a dynamically-added 4th/5th knight gets its own slot.
+  // Custom (idx 2) gets its own dropdown, independent of Model 2.
+  const [syncAnims, setSyncAnims] = useState<string[]>([])
   const [animations, setAnimations] = useState<AnimDef[]>([])
   const [draft, setDraft] = useState<DraftAnim | null>(null)
   const [hydrated, setHydrated] = useState(false)
@@ -509,8 +511,9 @@ export default function EditorPanel() {
     window.__editor?.playAnimation(resolved)
   }
 
-  // Sync-play: fire one anim on Model 1 and another on Model 2 at the same
-  // moment so you can watch how they synchronize (hit vs block timing).
+  // Sync-play: fire one anim per model simultaneously. Each model has
+  // its own slot in `syncAnims` (indexed by model idx) so picking an
+  // anim on Custom doesn't bleed into Model 2's dropdown.
   const onPlaySync = () => {
     const ed = window.__editor as any
     const fire = (modelIdx: number, animId: string) => {
@@ -525,8 +528,9 @@ export default function EditorPanel() {
         : undefined
       ed?.playAnimationOnModel?.(modelIdx, resolved, initialPose)
     }
-    fire(0, syncAnim1)
-    fire(1, syncAnim2)
+    for (let i = 0; i < models.length; i++) {
+      fire(i, syncAnims[i] ?? '')
+    }
   }
 
   return (
@@ -845,8 +849,15 @@ export default function EditorPanel() {
         ) : (
           <>
             {models.map((mName, idx) => {
-              const value = idx === 0 ? syncAnim1 : syncAnim2
-              const setter = idx === 0 ? setSyncAnim1 : setSyncAnim2
+              const value = syncAnims[idx] ?? ''
+              const setter = (next: string) => {
+                setSyncAnims((curr) => {
+                  const copy = [...curr]
+                  while (copy.length <= idx) copy.push('')
+                  copy[idx] = next
+                  return copy
+                })
+              }
               return (
                 <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                   <span style={{ fontSize: 11, opacity: 0.7, width: 60 }}>{mName}</span>
@@ -868,9 +879,9 @@ export default function EditorPanel() {
             <button
               style={{ ...btnPrimary, width: '100%', marginTop: 6 }}
               onClick={onPlaySync}
-              disabled={!syncAnim1 && !syncAnim2}
+              disabled={!syncAnims.some((s) => !!s)}
             >
-              ▶ Play both
+              ▶ Play all
             </button>
           </>
         )}

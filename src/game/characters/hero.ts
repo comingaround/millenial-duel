@@ -9,6 +9,7 @@ import {
 } from '@babylonjs/core'
 import { playAnimation, AnimationKeyframe } from '../../editor/animation-player'
 import { applyPose } from '../../editor/pose-store'
+import { attachWeaponToHand, type WeaponLibraryEntry } from '../../editor/editor-scene'
 
 // Hero stands 3m behind the camera-default-stance. Faces +Z toward opponent.
 const POSITION = new Vector3(0, 0, -8)
@@ -45,7 +46,7 @@ export type HeroApi = {
   getHeadNode: () => TransformNode | null
 }
 
-export function createHero(scene: Scene): Promise<HeroApi | null> {
+export function createHero(scene: Scene, weaponLibrary?: WeaponLibraryEntry[]): Promise<HeroApi | null> {
   return SceneLoader.ImportMeshAsync('', '/models/', 'knight.glb', scene)
     .then((result) => {
       const root =
@@ -95,6 +96,16 @@ export function createHero(scene: Scene): Promise<HeroApi | null> {
       // Head bone (for the Locked camera mode to pin to)
       const headBone = skeleton?.bones.find((b) => b.name === 'Head')
       const headNode = headBone?._linkedTransformNode ?? null
+
+      // Primary weapon: replace stock sword with the axe-textured library
+      // entry. Rotation (90, 90, 45) deg matches what the user dialled
+      // in via the Creator on Model 3.
+      if (weaponLibrary && skeleton) {
+        attachWeaponToHand(
+          scene, weaponLibrary, 'axe_textured',
+          result.meshes, skeleton, 'Hand Hold.R', [90, 90, 45],
+        )
+      }
 
       console.log(
         `[hero] knight loaded — ${result.meshes.length} meshes`,

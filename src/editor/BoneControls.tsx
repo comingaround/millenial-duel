@@ -889,8 +889,11 @@ function PartTripleRow({
   return (
     <div style={partTripleRowStyle}>
       <span style={{ fontSize: 10, opacity: 0.55, width: 38 }}>{label}</span>
+      <span style={partAxisLabelStyle}>X</span>
       <PartNumInput value={fmt(x)} onCommit={(v) => onSet(0, v)} />
+      <span style={partAxisLabelStyle}>Y</span>
       <PartNumInput value={fmt(y)} onCommit={(v) => onSet(1, v)} />
+      <span style={partAxisLabelStyle}>Z</span>
       <PartNumInput value={fmt(z)} onCommit={(v) => onSet(2, v)} />
     </div>
   )
@@ -1442,7 +1445,15 @@ const partDelStyle: CSSProperties = {
 const partTripleRowStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  gap: 4,
+  gap: 3,
+}
+const partAxisLabelStyle: CSSProperties = {
+  fontSize: 9,
+  opacity: 0.55,
+  fontWeight: 700,
+  width: 8,
+  textAlign: 'center',
+  flexShrink: 0,
 }
 const partNumInputStyle: CSSProperties = {
   flex: 1,

@@ -17,7 +17,7 @@ import { createTrees } from './scene/trees'
 import { createBuildings } from './scene/buildings'
 import { createOpponent } from './characters/opponent'
 import { createHero } from './characters/hero'
-import { ACTIVE_BONES, createEditorScene } from '../editor/editor-scene'
+import { ACTIVE_BONES, createEditorScene, loadWeaponLibrary } from '../editor/editor-scene'
 import type { CreatorPart, CreatorShape } from '../editor/editor-scene'
 import {
   createPartMesh,
@@ -263,8 +263,13 @@ export function createEngine(
   createGround(scene)
   createTrees(scene)
   createBuildings(scene)
+  // Load the weapon library FIRST so hero (and later opponent) can equip
+  // an axe instead of the stock sword baked into knight.glb. Browser-cached
+  // — the editor scene also loadWeaponLibrary's, but the fetch dedupes.
+  loadWeaponLibrary(scene).then((weaponLibrary) => {
+    createHero(scene, weaponLibrary)
+  })
   createOpponent(scene)
-  createHero(scene)
 
   // --- Editor: load TWO knights facing each other + wire bone picker etc ---
   createEditorScene(scene).then((ed) => {
@@ -915,9 +920,26 @@ export function createEngine(
       },
       // Hide / show a model by toggling its root TransformNode. setEnabled
       // hides the whole hierarchy AND skips updates — cheap and complete.
+      // Two follow-up toggles:
+      //  1. Bone-picker spheres are scene-level (not parented to model
+      //     root) so setEnabled on root alone leaves them floating.
+      //  2. Skinned-clone creator parts are parented to a Bone via
+      //     attachToBone — they're NOT in the model-root TransformNode
+      //     hierarchy and don't inherit setEnabled. Toggle each part's
+      //     mesh + groupChildren directly.
       setModelVisible: (idx: number, visible: boolean) => {
         if (idx < 0 || idx >= ed.models.length) return
-        ed.models[idx].root.setEnabled(visible)
+        const m = ed.models[idx]
+        m.root.setEnabled(visible)
+        for (const inst of m.creatorParts.values()) {
+          inst.mesh.setEnabled(visible)
+          if (inst.groupChildren) {
+            for (const c of inst.groupChildren) c.mesh.setEnabled(visible)
+          }
+        }
+        if (idx === activeIdx && bonePicker) {
+          bonePicker.setActive(visible && cameraMode === 'editor')
+        }
       },
       getModelVisible: (idx: number) => {
         if (idx < 0 || idx >= ed.models.length) return true
