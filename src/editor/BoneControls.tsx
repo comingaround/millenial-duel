@@ -51,7 +51,8 @@ export default function BoneControls() {
   const [creatorTargets, setCreatorTargets] = useState<{
     bones: string[]
     props: Array<{ stem: string; members: string[] }>
-  }>({ bones: [], props: [] })
+    weapons: Array<{ stem: string; members: string[]; kind: string }>
+  }>({ bones: [], props: [], weapons: [] })
 
   useEffect(() => {
     let unsub: (() => void) | null = null
@@ -599,7 +600,11 @@ function CreatorTab({
   parts: CreatorPart[]
   addTarget: string
   setAddTarget: (t: string) => void
-  creatorTargets: { bones: string[]; props: Array<{ stem: string; members: string[] }> }
+  creatorTargets: {
+    bones: string[]
+    props: Array<{ stem: string; members: string[] }>
+    weapons: Array<{ stem: string; members: string[]; kind: string }>
+  }
   activeBones: string[]
   onChange: () => void
 }) {
@@ -622,10 +627,17 @@ function CreatorTab({
   const boneOptions = (creatorTargets.bones.length ? creatorTargets.bones : activeBones)
     .filter((b) => activeBoneSet.has(b))
   const propOptions = creatorTargets.props
+  const weaponOptions = creatorTargets.weapons
   const propByStem = new Map(propOptions.map((p) => [p.stem, p]))
+  const weaponByStem = new Map(weaponOptions.map((w) => [w.stem, w]))
   const onAdd = () => {
     const ed = (window as any).__editor
-    if (addTarget.startsWith('prop:')) {
+    if (addTarget.startsWith('weapon:')) {
+      const stem = addTarget.slice(7)
+      const wpn = weaponByStem.get(stem)
+      if (!wpn) return
+      ed?.addCreatorWeaponClone?.(stem, wpn.members)
+    } else if (addTarget.startsWith('prop:')) {
       const stem = addTarget.slice(5)
       const prop = propByStem.get(stem)
       if (!prop) return
@@ -654,6 +666,19 @@ function CreatorTab({
     { name: 'Shield', props: propOptions.filter((p) => /shield/i.test(p.stem)) },
     { name: 'Other',  props: propOptions.filter((p) => !/sword|shield/i.test(p.stem)) },
   ].filter((s) => s.props.length > 0)
+
+  // Weapon-library items grouped by `kind` (axe/sword/bow/etc.). The
+  // engine already classifies them at scene init via the WEAPON_CATALOGUE.
+  const libraryByKind = new Map<string, typeof weaponOptions>()
+  for (const w of weaponOptions) {
+    const k = w.kind || 'other'
+    if (!libraryByKind.has(k)) libraryByKind.set(k, [])
+    libraryByKind.get(k)!.push(w)
+  }
+  const libraryKindOrder = ['sword', 'axe', 'dagger', 'mace', 'hammer', 'bow', 'shield', 'other']
+  const librarySubcats = libraryKindOrder
+    .filter((k) => libraryByKind.has(k))
+    .map((k) => ({ name: k.charAt(0).toUpperCase() + k.slice(1), items: libraryByKind.get(k)! }))
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto' }}>
@@ -700,6 +725,24 @@ function CreatorTab({
               {s.props.map((p) => (
                 <option key={`p-${p.stem}`} value={`prop:${p.stem}`} style={creatorItemStyle}>
                   {`        ${p.stem}${p.members.length > 1 ? ` (${p.members.length} parts)` : ''}`}
+                </option>
+              ))}
+            </React.Fragment>
+          ))}
+          {/* Third category: weapon library (GLBs from /models/weapons/). */}
+          {librarySubcats.length > 0 ? (
+            <option disabled value="" style={creatorCategoryStyle}>
+              {'▸ Weapons (library)'}
+            </option>
+          ) : null}
+          {librarySubcats.map((s) => (
+            <React.Fragment key={`lg-${s.name}`}>
+              <option disabled value="" style={creatorSubcategoryStyle}>
+                {`   ▸ ${s.name}`}
+              </option>
+              {s.items.map((w) => (
+                <option key={`w-${w.stem}`} value={`weapon:${w.stem}`} style={creatorItemStyle}>
+                  {`        ${w.stem}${w.members.length > 1 ? ` (${w.members.length} parts)` : ''}`}
                 </option>
               ))}
             </React.Fragment>

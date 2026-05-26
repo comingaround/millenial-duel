@@ -36,7 +36,10 @@ export const DEFAULT_PART_DEFAULTS: Record<CreatorShape, {
 }
 
 const DEFAULT_COLOR_PRIMITIVE = '#8a8d92'  // neutral grey
-const DEFAULT_COLOR_CLONE     = '#d9534f'  // red — distinct so a successful clone is obvious
+// Sentinel — clones leave color empty so create funcs can fill it from
+// the source material's actual diffuse/albedo. If sampling fails, falls
+// back to DEFAULT_COLOR_PRIMITIVE.
+const COLOR_FROM_SOURCE        = ''
 const DEG2RAD = Math.PI / 180
 
 export function newPartId(): string {
@@ -53,8 +56,19 @@ export function defaultPartFor(boneName: string, shape: CreatorShape): CreatorPa
     scale: [...d.scale] as [number, number, number],
     offset: [...d.offset] as [number, number, number],
     rotation: [0, 0, 0],
-    color: shape === 'clone' ? DEFAULT_COLOR_CLONE : DEFAULT_COLOR_PRIMITIVE,
+    // Primitives still pick a neutral grey; clones defer to source.
+    color: shape === 'clone' ? COLOR_FROM_SOURCE : DEFAULT_COLOR_PRIMITIVE,
   }
+}
+
+// Sample a colour off a Babylon material. Supports StandardMaterial
+// (diffuseColor) + PBRMaterial (albedoColor). Returns lowercase hex
+// "#rrggbb" or null when the material can't be sampled.
+function sampleMaterialHex(src: any): string | null {
+  if (!src) return null
+  const c: Color3 | undefined = src.diffuseColor ?? src.albedoColor
+  if (!c || typeof c.toHexString !== 'function') return null
+  return c.toHexString().toLowerCase()
 }
 
 // Build a part's mesh + own material on the customModel. For 'clone'
@@ -171,6 +185,14 @@ function createClonePart(
   mesh.attachToBone(targetSkin.bone, targetSkin.refMesh)
   applyCloneTransform(mesh, part.scale, part.offset, part.rotation)
 
+  // Seed colour from the first source mesh that contributed triangles
+  // to this bone — preserves the skin/clothes/armour palette instead
+  // of slapping a default red on every body-part clone.
+  if (geom.firstSourceMaterial) {
+    const sampled = sampleMaterialHex(geom.firstSourceMaterial)
+    if (sampled) part.color = sampled
+  }
+  if (!part.color) part.color = DEFAULT_COLOR_PRIMITIVE
   return wrapWithMaterial(scene, mesh, part)
 }
 
@@ -211,15 +233,19 @@ function createPropClonePart(
   mesh.metadata = { creatorPartId: part.id }
   mesh.parent = parentNode
 
-  // Copy the source mesh's LOCAL transform — that's what positions it
-  // correctly relative to the bone (sword tip away from hand, etc).
-  mesh.position.copyFrom(sourceMesh.position)
-  if (sourceMesh.rotationQuaternion) {
-    mesh.rotationQuaternion = sourceMesh.rotationQuaternion.clone()
-  } else {
-    mesh.rotation.copyFrom(sourceMesh.rotation)
+  // In-skeleton props (parented to a Model 1 bone) carry a meaningful
+  // local pose — copy it. Library weapons (parent=null) start at
+  // identity so the bone + user offset/rot determines pose entirely.
+  const inSkeletonProp = sourceMesh.parent !== null
+  if (inSkeletonProp) {
+    mesh.position.copyFrom(sourceMesh.position)
+    if (sourceMesh.rotationQuaternion) {
+      mesh.rotationQuaternion = sourceMesh.rotationQuaternion.clone()
+    } else {
+      mesh.rotation.copyFrom(sourceMesh.rotation)
+    }
+    mesh.scaling.copyFrom(sourceMesh.scaling)
   }
-  mesh.scaling.copyFrom(sourceMesh.scaling)
   // Apply user adjustments ON TOP via offset/rotation Euler (deg) /
   // scale multiplier. For props, this lets users nudge the cloned sword
   // forward or rescale without losing the canonical "in hand" placement.
@@ -237,6 +263,12 @@ function createPropClonePart(
   }
 
   console.log(`[creator] prop clone '${part.sourceMeshName}' → bone '${part.boneName}': ${sourceVData.positions ? (sourceVData.positions.length / 3) : 0} verts`)
+  // Seed the colour from the source mesh's material so the clone starts
+  // life looking like the original. Recolouring later (via style panel)
+  // is unrelated.
+  const sampled = sampleMaterialHex(sourceMesh.material)
+  if (sampled) part.color = sampled
+  else if (!part.color) part.color = DEFAULT_COLOR_PRIMITIVE
   return wrapWithMaterial(scene, mesh, part)
 }
 
@@ -280,17 +312,38 @@ function createPropGroupClonePart(
     child.isPickable = false
     child.renderingGroupId = 0
     child.parent = groupRoot
-    // Copy source local transform so each child sits in its correct
-    // place relative to the group root (which itself sits at the bone).
-    child.position.copyFrom(src.position)
-    if (src.rotationQuaternion) child.rotationQuaternion = src.rotationQuaternion.clone()
-    else child.rotation.copyFrom(src.rotation)
-    child.scaling.copyFrom(src.scaling)
+    // In-skeleton props (sword/shield parented to Model 1's hand bone)
+    // have a meaningful source-local pose relative to that bone — copy
+    // it. Library weapons (loaded standalone, parent=null after the
+    // normalize step) have no such anchor — start at identity so the
+    // user's bone choice + per-part offset/rot fully determines pose.
+    const inSkeletonProp = src.parent !== null
+    if (inSkeletonProp) {
+      child.position.copyFrom(src.position)
+      if (src.rotationQuaternion) child.rotationQuaternion = src.rotationQuaternion.clone()
+      else child.rotation.copyFrom(src.rotation)
+      child.scaling.copyFrom(src.scaling)
+    }
+    // else: leave child at identity local — vertices are already self-
+    // contained at normalized scale.
 
-    const mat = new StandardMaterial(`creator_mat_${part.id}_${childName}`, scene)
-    applyColor(mat, part.color)
-    mat.specularColor = new Color3(0.10, 0.10, 0.12)
-    mat.backFaceCulling = false
+    // Clone the source material so textures (albedoTexture, normalMap,
+    // specular/roughness, etc) AND base colour carry through. Cloning
+    // gives the part its own independent material — disposing the clone
+    // won't affect the source. If source has no material, fall back to
+    // a sampled-colour StandardMaterial.
+    let mat: any
+    if (src.material && typeof (src.material as any).clone === 'function') {
+      mat = (src.material as any).clone(`creator_mat_${part.id}_${childName}`)
+    } else {
+      mat = new StandardMaterial(`creator_mat_${part.id}_${childName}`, scene)
+      const sampled = sampleMaterialHex(src.material)
+      if (sampled) applyColor(mat, sampled)
+      else if (part.color) applyColor(mat, part.color)
+      else applyColor(mat, DEFAULT_COLOR_PRIMITIVE)
+      mat.specularColor = new Color3(0.10, 0.10, 0.12)
+      mat.backFaceCulling = false
+    }
     child.material = mat
     children.push({ mesh: child, material: mat })
   }
@@ -299,15 +352,21 @@ function createPropGroupClonePart(
     console.warn(`[creator] group '${part.id}' had no resolvable children; using placeholder`)
     return placeholderClone(scene, part, customModel)
   }
+  // Schema colour — first child's sampled value (for save/load + future
+  // style panel). Children's actual materials are independent.
+  if (!part.color) {
+    const firstSrc = sourceModel.glbMeshes.find(
+      (m) => m instanceof Mesh && m.name === part.groupMeshNames![0],
+    ) as Mesh | undefined
+    const firstSampled = firstSrc ? sampleMaterialHex(firstSrc.material) : null
+    part.color = firstSampled ?? DEFAULT_COLOR_PRIMITIVE
+  }
 
-  // Apply user's group-level transform on top.
-  groupRoot.position.copyFromFloats(part.offset[0], part.offset[1], part.offset[2])
-  groupRoot.scaling.copyFromFloats(part.scale[0], part.scale[1], part.scale[2])
-  groupRoot.rotation.copyFromFloats(
-    part.rotation[0] * DEG2RAD,
-    part.rotation[1] * DEG2RAD,
-    part.rotation[2] * DEG2RAD,
-  )
+  // Apply user's group-level transform on top — NORMALISED by the
+  // parent bone's absolute world scale. Knight bones carry baked
+  // armature scale (often 100×) inherited from the GLB; without this
+  // division, a "100% size" weapon would render 100× too big.
+  applyGroupTransform(groupRoot, parentNode, part.scale, part.offset, part.rotation)
 
   console.log(`[creator] group clone (${children.length} children) → bone '${part.boneName}'`)
   return {
@@ -373,13 +432,12 @@ export function updatePartMesh(
     if (next.groupMeshNames) {
       // Group root carries the user transform — children stay at their
       // copied source-local poses, so the group rotates/scales as one.
-      inst.mesh.position.copyFromFloats(next.offset[0], next.offset[1], next.offset[2])
-      inst.mesh.scaling.copyFromFloats(next.scale[0], next.scale[1], next.scale[2])
-      inst.mesh.rotation.copyFromFloats(
-        next.rotation[0] * DEG2RAD,
-        next.rotation[1] * DEG2RAD,
-        next.rotation[2] * DEG2RAD,
-      )
+      // Normalised by parent bone's baked armature scale (knight bones
+      // carry ~100× scale that would otherwise multiply the weapon).
+      const parent = inst.mesh.parent as TransformNode | null
+      if (parent) {
+        applyGroupTransform(inst.mesh, parent, next.scale, next.offset, next.rotation)
+      }
     } else if (next.shape === 'clone') {
       applyCloneTransform(inst.mesh, next.scale, next.offset, next.rotation)
     } else {
@@ -433,6 +491,32 @@ function applyCloneTransform(
   mesh.rotation.copyFromFloats(rotation[0] * DEG2RAD, rotation[1] * DEG2RAD, rotation[2] * DEG2RAD)
 }
 
+// Apply user scale/offset/rotation to a group root parented to a bone
+// TransformNode. Divides by `parent.absoluteScaling` so the user's
+// scale (1.0 = 100%) lands at the weapon's normalised world size,
+// not multiplied by the bone's baked armature scale (often 100×).
+// Offset is also normalised — cm in = cm rendered.
+function applyGroupTransform(
+  groupRoot: Mesh,
+  parent: TransformNode,
+  scale: [number, number, number],
+  offset: [number, number, number],
+  rotation: [number, number, number],
+): void {
+  parent.computeWorldMatrix(true)
+  const ws = parent.absoluteScaling
+  const sx = Math.abs(ws.x) || 1
+  const sy = Math.abs(ws.y) || 1
+  const sz = Math.abs(ws.z) || 1
+  groupRoot.scaling.copyFromFloats(scale[0] / sx, scale[1] / sy, scale[2] / sz)
+  groupRoot.position.copyFromFloats(offset[0] / sx, offset[1] / sy, offset[2] / sz)
+  groupRoot.rotation.copyFromFloats(
+    rotation[0] * DEG2RAD,
+    rotation[1] * DEG2RAD,
+    rotation[2] * DEG2RAD,
+  )
+}
+
 // Walk every skinned mesh on the source. For each triangle with at
 // least one vertex meaningfully weighted (≥0.30) to the target bone,
 // copy those vertices transformed into bone-local-skeleton space by
@@ -452,13 +536,16 @@ function applyCloneTransform(
 function extractBoneGeometry(
   source: ModelInstance,
   boneName: string,
-): { positions: Float32Array; indices: number[]; normals: number[] } | null {
+): { positions: Float32Array; indices: number[]; normals: number[]; firstSourceMaterial: any } | null {
   const outPositions: number[] = []
   const outIndices: number[] = []
   const outNormals: number[] = []
   let nextIdx = 0
   let totalTris = 0
   let normalsAvailable = true
+  // First source mesh that contributes at least one triangle — its
+  // material colour seeds the clone's initial appearance.
+  let firstSourceMaterial: any = null
 
   for (const m of source.glbMeshes) {
     if (!(m instanceof Mesh)) continue
@@ -510,6 +597,7 @@ function extractBoneGeometry(
       }
       if (bestBone !== boneIdx) continue
       totalTris++
+      if (!firstSourceMaterial && m.material) firstSourceMaterial = m.material
       for (const oi of [i0, i1, i2] as const) {
         let ni = localMap.get(oi)
         if (ni === undefined) {
@@ -541,7 +629,7 @@ function extractBoneGeometry(
     normals = []
     VertexData.ComputeNormals(positionsArr, outIndices, normals)
   }
-  return { positions: positionsArr, indices: outIndices, normals }
+  return { positions: positionsArr, indices: outIndices, normals, firstSourceMaterial }
 }
 
 // Find a (Bone, referenceMesh) pair on a model that owns the named
@@ -580,8 +668,15 @@ export function disposePartMesh(inst: CreatorPartInstance): void {
   if (!inst.groupChildren) inst.material.dispose()
 }
 
-function applyColor(mat: StandardMaterial, hex: string): void {
+// Apply a hex colour to either a StandardMaterial (diffuseColor +
+// ambientColor) or a PBRMaterial (albedoColor). For PBR materials with
+// an albedoTexture, this tints the texture rather than replacing it.
+function applyColor(mat: any, hex: string): void {
   const c = Color3.FromHexString(hex)
-  mat.diffuseColor = c
-  mat.ambientColor = c.scale(0.5)
+  if ('diffuseColor' in mat) {
+    mat.diffuseColor = c
+    if ('ambientColor' in mat) mat.ambientColor = c.scale(0.5)
+  } else if ('albedoColor' in mat) {
+    mat.albedoColor = c
+  }
 }

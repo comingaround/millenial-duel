@@ -2,6 +2,7 @@ import '@babylonjs/loaders/glTF'
 import {
   AbstractMesh,
   Color3,
+  Material,
   Matrix,
   Mesh,
   Scene,
@@ -9,6 +10,7 @@ import {
   Skeleton,
   StandardMaterial,
   Vector3,
+  VertexBuffer,
 } from '@babylonjs/core'
 import { POSITION_BONES } from './pose-store'
 
@@ -114,8 +116,11 @@ export type CreatorPart = {
 export type CreatorPartInstance = {
   data: CreatorPart
   mesh: Mesh
-  material: StandardMaterial
-  groupChildren?: Array<{ mesh: Mesh; material: StandardMaterial }>
+  // Material may be StandardMaterial (primitives + flat clones) OR a
+  // PBRMaterial clone (textured-prop clones that need to keep the
+  // source's albedoTexture, metallic/roughness, normal map, etc).
+  material: Material
+  groupChildren?: Array<{ mesh: Mesh; material: Material }>
 }
 
 export type ModelInstance = {
@@ -137,10 +142,22 @@ export type ModelInstance = {
   creatorParts: Map<string, CreatorPartInstance>
 }
 
+// Weapon library — GLB props loaded from public/models/weapons/. Each
+// entry has the source meshes stashed at scene-graph leaves (parented to
+// a hidden TransformNode) so Babylon's normal lifecycle disposes them on
+// engine teardown. The Creator pulls geometry from these meshes via the
+// existing prop-clone path.
+export type WeaponLibraryEntry = {
+  stem: string         // base name (e.g. "copper_axe")
+  meshes: Mesh[]       // renderable sub-meshes (1 or more primitives)
+  kind: 'axe' | 'sword' | 'shield' | 'bow' | 'dagger' | 'hammer' | 'mace' | 'other'
+}
+
 export type EditorSceneApi = {
   models: ModelInstance[]      // [Model 1, Model 2, Custom, …]
   allBoneNames: string[]       // shared (same rig)
   animationGroups: any[]       // baked anims from the first GLB load
+  weaponLibrary: WeaponLibraryEntry[]
   // Spawn a fresh knight instance at runtime. Used by the "+ Add" button
   // in the left dashboard. Appends to `models` and returns the new index.
   addModel: (name: string, position: Vector3, yRotation: number, hideAllMeshes?: boolean) => Promise<number>
@@ -283,10 +300,16 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
       `[editor] loaded 3 knight instances (Model 1 + Model 2 + Custom skeleton) — ${m1.skeleton.bones.length} bones each`,
     )
 
+    // Load the weapon library — extra GLBs from /public/models/weapons/.
+    // Each file lands as a separate hidden node tree; its meshes are
+    // surfaced to the Creator's "Weapons (library)" dropdown.
+    const weaponLibrary = await loadWeaponLibrary(scene)
+
     const api: EditorSceneApi = {
       models: [m1, m2, m3],
       allBoneNames,
       animationGroups,
+      weaponLibrary,
       addModel: async (name, position, yRotation, hideAllMeshes = false) => {
         const m = await loadKnightInstance(scene, matCache, name, position, yRotation, hideAllMeshes)
         api.models.push(m)
@@ -297,5 +320,127 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
   } catch (err) {
     console.error('[editor] load failed', err)
     return null
+  }
+}
+
+// Catalogue of GLBs in /public/models/weapons/. Each entry is loaded
+// async at editor scene init. Adding a new weapon = one line here +
+// dropping its GLB into /public/models/weapons/.
+// `targetMaxDim` (m): the weapon's geometry is auto-scaled at load so
+// its largest dimension equals this value. Sensible defaults per kind:
+//   axe / sword / mace ≈ 0.6m
+//   greatsword ≈ 1.2m
+//   dagger ≈ 0.25m
+//   bow ≈ 1.0m
+//   shield ≈ 0.5m
+const WEAPON_CATALOGUE: Array<{
+  file: string
+  stem: string
+  kind: WeaponLibraryEntry['kind']
+  targetMaxDim: number
+}> = [
+  { file: 'axe_textured.glb', stem: 'axe_textured', kind: 'axe', targetMaxDim: 0.6 },
+]
+
+async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntry[]> {
+  const library: WeaponLibraryEntry[] = []
+  for (const entry of WEAPON_CATALOGUE) {
+    try {
+      const result = await SceneLoader.ImportMeshAsync('', '/models/weapons/', entry.file, scene)
+      const meshes: Mesh[] = []
+      for (const m of result.meshes) {
+        if (!(m instanceof Mesh)) continue
+        if (m.getTotalVertices() === 0) continue
+        // Don't render the source — Creator pulls geometry from it but
+        // the original stays invisible offstage.
+        m.setEnabled(false)
+        meshes.push(m)
+      }
+      if (meshes.length === 0) {
+        console.warn(`[editor] weapon '${entry.stem}' loaded but had no renderable meshes`)
+        continue
+      }
+      // Auto-normalize the weapon's size so cloning produces a sensible
+      // result regardless of the FBX/GLB's unit system or parent
+      // transform stack. Bakes the world matrix + scale factor into
+      // vertex positions; detaches from parent so the mesh stands alone.
+      normalizeWeaponMeshes(meshes, entry.targetMaxDim)
+      library.push({ stem: entry.stem, meshes, kind: entry.kind })
+      console.log(`[editor] weapon library: '${entry.stem}' (${entry.kind}) — ${meshes.length} mesh(es), normalized to ${entry.targetMaxDim}m`)
+      // ─── DEBUG PREVIEW ───
+      // Render the axe just to the right of the Custom model (x=53) so
+      // the user can eyeball its size before cloning it onto a bone.
+      // Remove this block once they're done evaluating.
+      if (entry.stem === 'axe_textured') {
+        for (let i = 0; i < meshes.length; i++) {
+          const m = meshes[i]
+          m.setEnabled(true)
+          m.position = new Vector3(54.0, 1.0, 0)
+          m.name = `__preview_${entry.stem}_${i}`
+        }
+        console.log(`[editor] DEBUG preview: '${entry.stem}' placed at (54.0, 1.0, 0) — next to Custom`)
+      }
+    } catch (err) {
+      console.warn(`[editor] failed to load weapon '${entry.stem}':`, err)
+    }
+  }
+  return library
+}
+
+// Bake a uniform scale factor into LOCAL vertex positions so the
+// weapon's largest dimension equals `targetMaxDim`. Detaches from
+// parent and resets local transform so the mesh stands alone — world
+// position equals local vertex position. Clones reading the source
+// mesh inherit the normalized geometry directly.
+//
+// We walk LOCAL vertex coords (NOT world) because parent transforms
+// after a GLB load can be lazy or contain conversion matrices that
+// don't compose cleanly with our scale factor.
+function normalizeWeaponMeshes(meshes: Mesh[], targetMaxDim: number): void {
+  // 1. Compute union LOCAL bounding box across all sub-meshes.
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+  for (const m of meshes) {
+    const positions = m.getVerticesData(VertexBuffer.PositionKind)
+    if (!positions) continue
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i], y = positions[i + 1], z = positions[i + 2]
+      if (x < minX) minX = x
+      if (y < minY) minY = y
+      if (z < minZ) minZ = z
+      if (x > maxX) maxX = x
+      if (y > maxY) maxY = y
+      if (z > maxZ) maxZ = z
+    }
+  }
+  const dx = maxX - minX
+  const dy = maxY - minY
+  const dz = maxZ - minZ
+  const maxD = Math.max(dx, dy, dz)
+  if (!Number.isFinite(maxD) || maxD < 1e-6) return
+  const factor = targetMaxDim / maxD
+  console.log(`[editor] weapon local bbox: ${dx.toFixed(3)} × ${dy.toFixed(3)} × ${dz.toFixed(3)} (max ${maxD.toFixed(3)}) → factor ${factor.toFixed(3)} → target ${targetMaxDim}m`)
+  // 2. For each mesh: multiply vertex positions by factor. Normals
+  // are direction vectors — uniform positive scale preserves direction,
+  // so we leave them as-is. Reset local transform + detach from parent.
+  for (const m of meshes) {
+    const positions = m.getVerticesData(VertexBuffer.PositionKind)
+    if (positions) {
+      const newPositions = new Float32Array(positions.length)
+      for (let i = 0; i < positions.length; i++) {
+        newPositions[i] = positions[i] * factor
+      }
+      // setVerticesData (NOT updateVerticesData) — GLB-loaded buffers
+      // default to non-updatable, and updateVerticesData silently no-ops
+      // on those. setVerticesData replaces the buffer with an updatable
+      // one (third arg = true).
+      m.setVerticesData(VertexBuffer.PositionKind, newPositions, true)
+    }
+    m.parent = null
+    m.position.setAll(0)
+    m.scaling.setAll(1)
+    m.rotation.setAll(0)
+    m.rotationQuaternion = null
+    m.refreshBoundingInfo()
   }
 }

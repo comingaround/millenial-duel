@@ -1230,7 +1230,7 @@
         0,
         0
       ],
-      "color": "#050505"
+      "color": "#f0c7a8"
     },
     {
       "id": "part_1779803647880_2yyw",
@@ -1251,7 +1251,7 @@
         0,
         0
       ],
-      "color": "#000000"
+      "color": "#f0c7a8"
     },
     {
       "id": "part_1779803720833_axv3",
@@ -1272,7 +1272,7 @@
         0,
         0
       ],
-      "color": "#d9534f"
+      "color": "#f0c7a8"
     },
     {
       "id": "part_1779803732230_3ybo",
@@ -1293,7 +1293,32 @@
         0,
         0
       ],
-      "color": "#d9534f"
+      "color": "#f0c7a8"
+    },
+    {
+      "id": "part_1779809065700_8tkj",
+      "boneName": "Hand Hold.R",
+      "shape": "clone",
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "offset": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        90,
+        90,
+        45
+      ],
+      "color": "#ffffff",
+      "sourceMeshName": "axe_textured",
+      "groupMeshNames": [
+        "__preview_axe_textured_0"
+      ]
     }
   ]
 }

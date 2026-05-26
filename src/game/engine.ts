@@ -986,11 +986,16 @@ export function createEngine(
       },
 
       // Enumerate available clone targets — all bones + non-skinned
-      // renderable prop meshes. Props are grouped by name stem so a
-      // multi-primitive prop ("Sword_primitive0", "..1", "..2", "..3")
-      // surfaces as one entry "Sword" that clones the whole group. UI
-      // distinguishes via `members` count.
-      getCreatorTargets: (): { bones: string[]; props: Array<{ stem: string; members: string[] }> } => {
+      // renderable prop meshes + weapon-library items. Props are grouped
+      // by name stem so a multi-primitive prop surfaces as one entry.
+      // `weapons` items come from /public/models/weapons/ — separate
+      // from Model 1's `props` so the UI can show them in their own
+      // category.
+      getCreatorTargets: (): {
+        bones: string[]
+        props: Array<{ stem: string; members: string[] }>
+        weapons: Array<{ stem: string; members: string[]; kind: string }>
+      } => {
         const sourceModel = ed.models[0]
         const bones = sourceModel.skeleton.bones.map((b) => b.name)
         // Collect all non-skinned, renderable, non-root meshes.
@@ -1015,7 +1020,14 @@ export function createEngine(
           byStem.get(stem)!.push(name)
         }
         const props = Array.from(byStem.entries()).map(([stem, members]) => ({ stem, members }))
-        return { bones, props }
+        // Weapon library — separate enumeration. Each entry already has a
+        // resolved stem + member mesh list at scene-init time.
+        const weapons = (ed.weaponLibrary ?? []).map((w) => ({
+          stem: w.stem,
+          members: w.meshes.map((m) => m.name),
+          kind: w.kind,
+        }))
+        return { bones, props, weapons }
       },
 
       // Add a multi-primitive prop as ONE group part. All children share
@@ -1060,15 +1072,61 @@ export function createEngine(
         return part.id
       },
 
+      // Add a weapon-library item as a Creator clone. Defaults attach
+      // bone to Hand Hold.R (right hand) — user can re-target after add.
+      // Treats every weapon as a "group" regardless of primitive count
+      // so the stem (e.g. "copper_axe") shows in the part label rather
+      // than the raw mesh name.
+      addCreatorWeaponClone: (stem: string, memberNames: string[], targetBone?: string): string | null => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return null
+        const customModel = ed.models[customIdx]
+        const sourceModel = ed.models[0]
+        const entry = ed.weaponLibrary?.find((w) => w.stem === stem)
+        if (!entry) {
+          console.warn(`[creator] weapon '${stem}' not found in library`)
+          return null
+        }
+        // Default attach: right hand. Shields would default to Hand Hold.L
+        // — that's a future weapon-kind-aware default.
+        const bone = targetBone ?? 'Hand Hold.R'
+        if (!customModel.skeleton.bones.find((b) => b.name === bone)) {
+          console.warn(`[creator] weapon target bone '${bone}' missing on Custom`)
+          return null
+        }
+        // Synthetic source — Model 1's bone-resolution machinery in
+        // createPropGroupClonePart only reads glbMeshes for the child
+        // lookup. Append the weapon meshes so the existing code path
+        // finds them by name.
+        const syntheticSource: any = {
+          ...sourceModel,
+          glbMeshes: [...sourceModel.glbMeshes, ...entry.meshes],
+        }
+        const part = defaultPartFor(bone, 'clone' as CreatorShape)
+        part.sourceMeshName = stem
+        part.groupMeshNames = memberNames
+        const inst = createPartMesh(scene, part, customModel, syntheticSource)
+        customModel.creatorParts.set(part.id, inst)
+        bumpCreatorParts()
+        return part.id
+      },
+
       updateCreatorPart: (id: string, patch: Partial<CreatorPart>) => {
         const customIdx = 2
         if (customIdx >= ed.models.length) return
         const customModel = ed.models[customIdx]
         const inst = customModel.creatorParts.get(id)
         if (!inst) return
-        // Reparenting + clone re-extraction is handled inside updatePartMesh
-        // (it knows whether the part is primitive vs clone).
-        const next = updatePartMesh(scene, inst, patch, customModel, ed.models[0])
+        // Source needs weapon library meshes too so weapon clones can
+        // rebuild (e.g. when user retargets the bone, the prop-group
+        // path re-looks-up meshes by name).
+        const sourceModel = ed.models[0]
+        const weaponMeshes = (ed.weaponLibrary ?? []).flatMap((w) => w.meshes)
+        const syntheticSource: any = {
+          ...sourceModel,
+          glbMeshes: [...sourceModel.glbMeshes, ...weaponMeshes],
+        }
+        const next = updatePartMesh(scene, inst, patch, customModel, syntheticSource)
         customModel.creatorParts.set(id, next)
         bumpCreatorParts()
       },
@@ -1092,16 +1150,24 @@ export function createEngine(
       },
 
       // Bulk replace — used by persistence hydrate on page load. Disposes
-      // current parts then recreates from data.
+      // current parts then recreates from data. Source's glbMeshes are
+      // augmented with the weapon library so persisted weapon clones
+      // find their source mesh by name on rehydrate.
       setCreatorParts: (parts: CreatorPart[]) => {
         const customIdx = 2
         if (customIdx >= ed.models.length) return
         const customModel = ed.models[customIdx]
+        const sourceModel = ed.models[0]
+        const weaponMeshes = (ed.weaponLibrary ?? []).flatMap((w) => w.meshes)
+        const syntheticSource: any = {
+          ...sourceModel,
+          glbMeshes: [...sourceModel.glbMeshes, ...weaponMeshes],
+        }
         for (const inst of customModel.creatorParts.values()) disposePartMesh(inst)
         customModel.creatorParts.clear()
         for (const p of parts) {
           if (!customModel.skeleton.bones.find((b) => b.name === p.boneName)) continue
-          const inst = createPartMesh(scene, p, customModel, ed.models[0])
+          const inst = createPartMesh(scene, p, customModel, syntheticSource)
           customModel.creatorParts.set(p.id, inst)
         }
         bumpCreatorParts()
