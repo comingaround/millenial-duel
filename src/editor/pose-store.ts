@@ -5,7 +5,11 @@ import { Skeleton } from '@babylonjs/core'
 // sliding the character root through the world, which is what we want for
 // crouch / weight-shift / lean poses. Other bones stay rotation-only so
 // limbs can't be stretched.
-export const POSITION_BONES: readonly string[] = ['Hips']
+// Bones that expose the TRANSLATE stepper. Hips drives leg-plant IK
+// (translate the chain root, legs adapt so feet stay planted). Hand.L/R
+// drive arm IK as end-effectors (translate the hand, arm chain bends
+// to reach). Feet TBD — would similarly be end-effectors for leg chain.
+export const POSITION_BONES: readonly string[] = ['Hips', 'Hand.L', 'Hand.R']
 
 export type Pose = {
   id: string

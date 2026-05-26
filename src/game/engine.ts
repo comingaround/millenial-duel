@@ -430,16 +430,94 @@ export function createEngine(
 
     }
 
+    // Arm IK — hand is the end effector. Translate the desired hand
+    // world position; Upper Arm + Lower Arm rotate to reach. Hand bone
+    // itself isn't translated (its local position stays at rest); it
+    // follows the chain naturally once the arm bones rotate.
+    const runArmIK = (side: 'L' | 'R', handTarget: Vector3) => {
+      const m = active()
+      const sk = m.skeleton
+      const upperBone = sk.bones.find((b) => b.name === `Upper Arm.${side}`)
+      const lowerBone = sk.bones.find((b) => b.name === `Lower Arm.${side}`)
+      const handBone  = sk.bones.find((b) => b.name === `Hand.${side}`)
+      if (!upperBone || !lowerBone || !handBone) return
+      const upperNode = upperBone._linkedTransformNode as any
+      const lowerNode = lowerBone._linkedTransformNode as any
+      const handNode  = handBone._linkedTransformNode  as any
+      if (!upperNode || !lowerNode || !handNode) return
+
+      upperNode.computeWorldMatrix(true)
+      lowerNode.computeWorldMatrix(true)
+      handNode.computeWorldMatrix(true)
+      const rootPos    = upperNode.getAbsolutePosition().clone()
+      const midRestPos = lowerNode.getAbsolutePosition().clone()
+      const endRestPos = handNode.getAbsolutePosition().clone()
+
+      // Pole hint: elbow droops downward (model's local -Y). Natural for
+      // most reaching motions. May want side-specific tweak later for
+      // overhead poses (e.g. local -Z for "elbow points back").
+      m.root.computeWorldMatrix(true)
+      const poleHint = m.root.getDirection(new Vector3(0, -1, 0)).normalize()
+
+      const { newMidPos, newEndPos } = solveTwoBoneIK(
+        rootPos, midRestPos, endRestPos, handTarget, poleHint,
+      )
+
+      const upperChildLocalDir = (lowerNode.position as Vector3).clone().normalize()
+      const lowerChildLocalDir = (handNode.position  as Vector3).clone().normalize()
+      const toRestQ = (arr: [number, number, number, number] | undefined) =>
+        arr ? new Quaternion(arr[0], arr[1], arr[2], arr[3]) : Quaternion.Identity()
+      const upperRestLocal = toRestQ(m.restPose[`Upper Arm.${side}`])
+      const lowerRestLocal = toRestQ(m.restPose[`Lower Arm.${side}`])
+
+      if (upperNode.parent) {
+        const wantedMidLocal = worldPosToParentLocal(upperNode.parent, newMidPos)
+        upperNode.rotationQuaternion = buildSwingDeltaLocalRotation(
+          upperRestLocal, upperChildLocalDir,
+          upperNode.position as Vector3, wantedMidLocal,
+        )
+      }
+
+      upperNode.computeWorldMatrix(true)
+      if (lowerNode.parent) {
+        lowerNode.parent.computeWorldMatrix(true)
+        const wantedEndLocal = worldPosToParentLocal(lowerNode.parent, newEndPos)
+        lowerNode.rotationQuaternion = buildSwingDeltaLocalRotation(
+          lowerRestLocal, lowerChildLocalDir,
+          lowerNode.position as Vector3, wantedEndLocal,
+        )
+      }
+    }
+
     const translateSelectedBone = (axis: 'x' | 'y' | 'z', delta: number) => {
       if (!currentSelection) return
       if (!POSITION_BONES.includes(currentSelection)) return
+
+      const isHips = currentSelection === 'Hips'
+      const isHandL = currentSelection === 'Hand.L'
+      const isHandR = currentSelection === 'Hand.R'
+
+      // Hand IK path — compute new world target and run arm IK.
+      // (Don't translate the Hand bone itself; it follows the chain.)
+      if (isHandL || isHandR) {
+        const side: 'L' | 'R' = isHandL ? 'L' : 'R'
+        const current = getBoneWorld(`Hand.${side}`)
+        if (!current) return
+        const axisVec =
+          axis === 'x' ? new Vector3(1, 0, 0)
+          : axis === 'y' ? new Vector3(0, 1, 0)
+          : new Vector3(0, 0, 1)
+        const target = current.add(axisVec.scale(delta))
+        runArmIK(side, target)
+        return
+      }
+
+      // Hips path — translate the bone in world space, then run leg-plant
+      // IK with pre-translate foot positions as targets.
       const bone = active().skeleton.bones.find((b) => b.name === currentSelection)
       const node = bone?._linkedTransformNode
       if (!node) return
 
-      // For Hips: capture feet world positions BEFORE we move, then run
-      // leg-plant IK AFTER so the feet visually stay where they were.
-      const isHips = currentSelection === 'Hips'
       let plantedL: Vector3 | null = null
       let plantedR: Vector3 | null = null
       if (isHips) {
