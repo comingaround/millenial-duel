@@ -6,7 +6,11 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 
 - ✅ Duel scene (hero + opponent + 2 baked-key animations) — same as before
 - ✅ Custom **pose/animation editor** at scene `(50, 0, 0)` — separate knight rig used purely as a posing puppet
-- ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips Y stepper (CROUCH only — X/Z removed since locomotion moved to per-keyframe displacement)**, editable typed input + scroll-wheel + ± buttons, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, Initial Position anchor (auto, undeletable), rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
+- ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips X/Y/Z TRANSLATE stepper with leg-plant IK (feet stay glued to their world positions while body shifts)**, editable typed input + scroll-wheel + ± buttons, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, **Initial Position virtual pose** (top of Poses list, system, can't delete), virtual Initial Position anchor, rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, **animations can pick an Initial Pose** that the model snaps to before keyframes play, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
+- ✅ **Multi-model editor** — two knight instances facing each other along X axis at world (50,0,0) and (51.5,0,0) (1.5m apart, locked). Active-model selector in left dash routes all bone-control / anim-preview to the selected one. Each model row has ✎ edit (rename + visibility toggle).
+- ✅ **Sync Play** — assign one anim per model and fire both simultaneously (`▶ Play both`) for combat practice / timing verification. Section sits above Animations in left dash.
+- ✅ **Two reset buttons** in right panel — Reset current model / Reset all models.
+- ✅ **Inverse Kinematics** — 2-bone analytical IK on each leg. Triggered when user translates the Hips bone (via stepper). Feet stay planted; knees bend forward (pole hint = model facing dir). Works across both models (active model only at a time). See "Hips translation with leg-plant IK" section below for the Babylon gotchas — lots of them.
 - ✅ **Locomotion = per-keyframe displacement** (NOT per-anim metadata, NOT Hips-X/Z promotion — both tried and rejected). Each keyframe in the animation builder has `pos X[ ] Y[ ] Z[ ]` cm inputs = where the body is at this keyframe relative to anim-start position. At playback, character's `root.position` is animated to those positions, transformed through root's rotation (so +Z = "character's forward"). Composes across anims: anim 2 starts from wherever anim 1 ended.
 - ✅ **Editor preview moves the editor knight** through the world (not just bones-in-place) so author sees the actual character motion. Reset snaps editor knight back to its starting world position.
 - ✅ **Always-visible BODY POSITION readout** in right panel (top, both Bones/Style modes) — live world-space cm coords relative to starting position. Updates every frame.
@@ -240,9 +244,36 @@ scene.onBeforeRenderObservable.add(() => {
 - **Undo coalescing on Stepper**: rapid clicks or wheel notches within `UNDO_BURST_MS = 300` collapse into ONE undo entry. Implementation: `lastStepTime` ref + `beginActionMaybe()` checks elapsed time before calling `pushUndo`. Avoids filling the 40-slot undo stack on a single scroll gesture.
 - Below all controls: Undo + Redo side-by-side; Reset (full-width, red-tinted) below.
 
-### Hips translation (crouch only — body shift)
+### Hips translation with leg-plant IK (TRANSLATE section)
 
-Hips Y is the only translation axis exposed in the editor UI. Used for crouch / body height — body sinks, feet stay (visually) attached. The X/Z steppers were removed; locomotion now lives in **per-keyframe displacement** (see next section). Don't put X/Z back without a real reason — it conflicts with the displacement system.
+When Hips is selected the right panel shows full **X / Y / Z** translation steppers. Every step kicks off **inverse kinematics on both legs** so the feet remain visually planted at their pre-translation world positions while the body shifts. Implementation lives in `src/editor/ik-solver.ts` + the `runLegPlantIK` helper in `engine.ts`. Locomotion (character-physically-moves-through-world) is still per-keyframe displacement (next section) — it's a different mechanism.
+
+**Algorithm per step:**
+1. Before `node.translate(axis, delta, Space.WORLD)`, capture `Foot.L` and `Foot.R` world positions.
+2. Apply the Hips translation. All leg bones rigidly follow (they're children).
+3. For each leg: run 2-bone analytical IK (`solveTwoBoneIK`) with the **post-translate** Upper Leg / Lower Leg / Foot world positions as the chain, and the **pre-translate** foot position as the target. Solver returns intended new world positions for the knee and foot.
+4. Apply via position-based local rotation (see "IK gotchas" below).
+
+**IK gotchas (all painful to find):**
+
+1. **The GLB has negative Y scale** (Blender→glTF Z-up→Y-up conversion). Anywhere we'd need to extract rotation from a world matrix via `Matrix.decompose`, Babylon returns garbage because of the mirror. Fix: **never decompose a scaled/mirrored matrix to recover rotation**. Use either chain-composed quaternions, or position transforms only (which work correctly under arbitrary scale).
+2. **`Bone.setRotationQuaternion(quat, Space.WORLD)` doesn't propagate** to the linked TransformNode that GLB-loaded rigs are actually driven by. Skeleton.prepare() reads from the linked node each frame, so any Bone API writes get reverted. Manipulate `node.rotationQuaternion` directly.
+3. **`node.rotationQuaternion.copyFrom(q)` doesn't mark dirty.** Only the property setter (`node.rotationQuaternion = q`) marks the node's world matrix dirty for recomputation. Mutation in place silently fails to take effect.
+4. **Bones don't use `(0, -1, 0)` as their down-axis universally.** The actual down-the-bone direction in a bone's LOCAL frame is `childNode.position.normalize()` (the child's local offset). Assuming a fixed axis breaks for rigs with rotated bone matrices.
+5. **Shortest-arc rotation randomizes twist.** A naive `rotationFromTo(currentDir, newDir)` produces a bone that points the right way but with arbitrary twist around its length axis — visible as a foot/knee rolled to the side. Fix: anchor to the bone's REST local rotation and add only a **swing delta** in parent space. See `buildSwingDeltaLocalRotation` in `engine.ts`.
+6. **Pole hint direction is rig-specific.** For this knight, the model's natural local forward is `+Z` (NOT `-Z` as the engine.ts comment used to claim). Pole hint = `m.root.getDirection(Vector3(0, 0, 1))`. If knees bend backward, flip the sign first before chasing other bugs.
+
+**Application path (position-based, scale-safe):**
+- `worldPosToParentLocal(parent, worldPos)`: `Matrix.invert` handles scale/mirror correctly for positions (unlike for rotations).
+- `buildSwingDeltaLocalRotation(restLocalRot, childLocalDir, boneLocalPos, targetLocal)`:
+  - `restChildInParent = restLocalRot.rotate(childLocalDir)` — where the child IS at rest, in parent frame
+  - `desiredDir = (targetLocal - boneLocalPos).normalize()` — where the child SHOULD be
+  - `delta = rotationFromTo(restChildInParent, desiredDir)` — shortest-arc swing in parent frame
+  - Return `delta.multiply(restLocalRot)` (Babylon: apply rest first, then swing)
+
+**Cache invalidation:** Reset (current model) and Reset All clear the chain-rest cache so IK re-anchors correctly. Same on `setActiveModel` switch (per-model IK).
+
+**Diagnostic harness:** `scripts/qa-ik-diagnose.mjs` — opens dev server in headless Chromium, switches to editor camera, selects Hips, translates by a known delta, dumps bone world positions before/after via `__editor.debugBoneWorld(name)`. Foot drift `[0, 0, 0]` = success. Add `window.__ikDebug = true` to surface internal solver values per IK call.
 
 - `POSITION_BONES = ['Hips']` in `src/editor/pose-store.ts` is the allow-list for translatable bones.
 - `snapshotPose` / `applyPose` capture/restore an optional `positions: Record<string, [x,y,z]>` alongside `rotations`. Only Hips Y is meant to be non-rest in practice.
@@ -356,7 +387,7 @@ The Initial Position anchor used to be stored in state and inserted by both an a
 - `window.__bjs` = `{engine, scene, camera, fpCam, editorCam, setCameraMode}`
 - `window.__hero` = `{playStrike, playBlock, getHeadNode, playCustomAnimation}`
 - `window.__opponent` = `{playSlash, playBlock, playCustomAnimation}`
-- `window.__editor` = `{snapshot, apply, reset, selectBone, getSelectedBone, addBoneSelectListener, rotateSelectedBone, translateSelectedBone, getSelectedBoneEuler, getSelectedBonePosition, hasPositionControl, getBodyPosition, setBonePickerActive, getEditorMaterials, setEditorMaterialColor, resetEditorMaterials, playAnimation, stopAnimation, pushUndo, undo, redo, canUndo, canRedo, getInitialAnchor, listBakedAnimations, importBakedAnimation, ...}`
+- `window.__editor` = `{snapshot, apply, reset, resetAll, selectBone, getSelectedBone, addBoneSelectListener, rotateSelectedBone, translateSelectedBone, getSelectedBoneEuler, getSelectedBonePosition, hasPositionControl, getBodyPosition, setBonePickerActive, getEditorMaterials, setEditorMaterialColor, resetEditorMaterials, playAnimation, playAnimationOnModel, stopAnimation, pushUndo, undo, redo, canUndo, canRedo, getInitialAnchor, listBakedAnimations, importBakedAnimation, getModels, getActiveModelIndex, setActiveModel, setModelVisible, getModelVisible, debugBoneWorld}`
 - `window.__customAnims` = resolved custom animations `{name, heroKey, oppKey, resolved: [{anchor:{rotations, positions?}, time}]}` — `positions` flows through for Hips translation playback
 
 ## Asset pipeline (FBX → GLB)
@@ -426,11 +457,14 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - Scene with sky, sun, clouds, grass, trees, buildings
 - Hero + opponent both rendered with the same knight model (helmets visible on opp, hidden on hero for FP; hair hidden on both; backface culling off so mirrored geometry renders)
 - Three cameras + UI toggle (Free Roam / Locked / Editor)
-- Q/Space (hero) and U/Enter (opponent) → strike + block animations
+- All combat actions are user-authored animations bound to user-chosen keys via the editor (no hardcoded Q/U/Space/Enter anymore)
 - Combat_idle looping on both, pauses cleanly when other animations play
 - Arrow-key camera movement (no page scroll)
-- **In-browser pose/animation editor** with bone-pick, knob rotation, Hips Y stepper (CROUCH only, world-space, editable input + scroll + ± buttons), anchors, animation builder w/ in-place Edit, per-keyframe X/Y/Z displacement inputs for locomotion, BODY POSITION live readout in right panel, editor preview that physically moves the knight, undo+redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, with burst-coalescing for stepper), library persistence (rotations + positions + displacement), import-baked, per-character key bindings
-- **Style tab** (right panel) — recolor every material slot (Blade, Wood, Emblem, Metal, etc.) on editor knight, Reset to defaults
+- **Two-knight editor** facing off (Model 1 + Model 2 along X axis, 1.5m apart) — active-model selector routes all bone-control to one at a time. Each model row has ✎ rename + visibility toggle.
+- **In-browser pose/animation editor** with bone-pick, knob rotation, **Hips X/Y/Z translation with leg-plant IK (feet auto-stay-planted)**, anchors, animation builder w/ in-place Edit, **Initial Pose virtual entry**, **per-animation Initial Pose dropdown** (snaps model before keyframes), per-keyframe X/Y/Z displacement inputs for locomotion (2-row UI), BODY POSITION live readout in right panel, editor preview that physically moves the knight, undo+redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, with burst-coalescing for stepper), library persistence (rotations + positions + displacement + initialPoseId), import-baked, per-character key bindings
+- **Sync Play** section — pick one anim per model, fire both at once for combat practice
+- **Style tab** (right panel) — recolor every material slot on editor knight, Reset to defaults
+- **Two reset buttons** — current model only OR all models
 
 ⏳ **Pending:**
 - HP system + damage timing
@@ -466,6 +500,14 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 18. **Native HTML `<select>` type-ahead steals keystrokes.** Pressing 'e' while a CameraToggle `<select>` had focus jumped to "Editor" option silently. Fix: `e.target.blur()` after onChange — release focus, keystrokes flow to game keydown handler. Worth checking any input/select for the same issue.
 19. **Stepper UI scope creep is fine in moderation.** Started as just ± buttons. Added wheel-scroll → more useful. Added typed input for big jumps → essential. Burst-coalescing for undo → critical. Each addition was small but compounded into a nice tool. Stop when the user stops asking.
 20. **Reset semantics matter as system grows.** Originally "Reset = restore rotations." Now "Reset = restore rotations + positions + Hips Y + editor knight root position." Every persistent piece of state needs an entry in the reset path. Skip one and the user will hit it eventually.
+21. **GLB-loaded skeletons in Babylon have a negative Y scale somewhere up the parent chain** (Z-up Blender → Y-up glTF conversion). Anything you do that requires "extract rotation from world matrix" via `Matrix.decompose` returns garbage. Avoid the world matrix for rotation work entirely — use position-only matrix transforms (which handle scale fine) or compose rotation quaternions through the parent chain manually.
+22. **`Bone.setRotationQuaternion(quat, Space.WORLD)` is a trap for GLB-driven rigs.** The bone's "source of truth" is the linked TransformNode; the Bone API writes are silently overwritten on the next `skeleton.prepare()`. Always operate on `bone._linkedTransformNode` directly.
+23. **Setter vs mutation on `node.rotationQuaternion`.** `node.rotationQuaternion = newQ` marks dirty; `node.rotationQuaternion.copyFrom(newQ)` does NOT and the new rotation never renders. Same for position.
+24. **Bone "down-the-bone" axis is NOT a universal `(0,-1,0)`.** It's whatever direction the child bone sits in this bone's local space — read it from `childNode.position.normalize()`. Hard-coding the axis works for trivial rigs and silently breaks for production ones.
+25. **Shortest-arc rotation kills twist.** Naive `rotationFromTo(currentDir, newDir)` re-aims the bone but randomizes its twist around its own length axis, which looks like the bone "rolling" sideways. Solution: anchor to the bone's REST local rotation and add only a swing delta in parent-local space. Then twist stays consistent.
+26. **For IK position-based application, transform the TARGET into parent-local space, not the rotation.** `parent.getWorldMatrix().invert() * worldPos` works under any scale/mirror. Then compute desired direction in parent-local and build the local rotation from that. Avoids decompose entirely.
+27. **Playwright diagnostic script per subsystem.** `scripts/qa-knight.mjs` for baseline screenshots; `scripts/qa-ik-diagnose.mjs` for IK foot-drift measurement with internal logging via `window.__ikDebug = true`. When iterating on math-heavy systems, having a script that hits the dev server and dumps numerical state in 10 seconds beats hand-testing in the browser every time.
+28. **In-engine diagnostic helpers belong on `window.__editor`.** `debugBoneWorld(name)` reads from the ACTIVE editor model (not whichever same-named bone Babylon found first). When the scene has multiple instances of the same rig (hero + opp + Model 1 + Model 2 = 4 Hips bones), `scene.getTransformNodeByName('Hips')` returns the wrong one. Always plumb diagnostics through the engine-side API that knows about model identity.
 
 ## What we tried and rejected
 
