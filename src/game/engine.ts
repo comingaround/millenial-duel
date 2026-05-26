@@ -21,6 +21,7 @@ import { ACTIVE_BONES, createEditorScene } from '../editor/editor-scene'
 import { createBonePicker } from '../editor/bone-picker'
 import { createEditorGizmo } from '../editor/gizmo'
 import { applyPose, snapshotPose, POSITION_BONES } from '../editor/pose-store'
+import { solveTwoBoneIK } from '../editor/ik-solver'
 import {
   AnimationKeyframe,
   playAnimation,
@@ -289,17 +290,170 @@ export function createEngine(
       node.rotationQuaternion = node.rotationQuaternion.multiply(offset)
     }
 
+    // Helpers for leg-plant IK on Hips translation.
+    const getBoneWorld = (boneName: string): Vector3 | null => {
+      const m = active()
+      const b = m.skeleton.bones.find((x) => x.name === boneName)
+      const n = b?._linkedTransformNode
+      if (!n) return null
+      n.computeWorldMatrix(true)
+      return n.getAbsolutePosition().clone()
+    }
+
+    // Transform a world position into a node's PARENT-LOCAL frame.
+    // Babylon's Matrix.invert handles scaled/mirrored matrices correctly
+    // for position transforms (unlike decompose, which fails for negative
+    // scale axes from the GLB's Blender→glTF Z-up→Y-up conversion).
+    const worldPosToParentLocal = (parent: any, worldPos: Vector3): Vector3 => {
+      parent.computeWorldMatrix(true)
+      const inv = parent.getWorldMatrix().clone()
+      inv.invert()
+      return Vector3.TransformCoordinates(worldPos, inv)
+    }
+
+    // Build a local rotation that aims the bone's child direction at a
+    // target position (in PARENT-local space), PRESERVING TWIST around
+    // the bone's length axis.
+    //
+    // Naive shortest-arc rotation (rotationFromTo) re-aims the bone but
+    // randomizes its twist, which makes knees/feet rotate strangely. By
+    // starting from the bone's REST local rotation (which has the correct
+    // twist baked in) and adding only a swing delta in parent space, the
+    // twist component stays consistent across IK calls.
+    //
+    // restLocalRot: bone's rest local rotation (in parent-local frame)
+    // childLocalDir: direction to child in BONE-local frame (normalized)
+    // boneLocalPos: bone's local position in parent-local frame
+    // targetLocal: where the child should land in parent-local frame
+    const buildSwingDeltaLocalRotation = (
+      restLocalRot: Quaternion,
+      childLocalDir: Vector3,
+      boneLocalPos: Vector3,
+      targetLocal: Vector3,
+    ): Quaternion => {
+      // Where the child IS at rest, in parent-local frame
+      const restChildInParent = Vector3.Zero()
+      childLocalDir.rotateByQuaternionToRef(restLocalRot, restChildInParent)
+      const restDir = restChildInParent.normalizeToNew()
+
+      // Where the child SHOULD be, in parent-local frame
+      const desiredDir = targetLocal.subtract(boneLocalPos).normalize()
+
+      // Shortest-arc swing in parent-local space
+      const d = Vector3.Dot(restDir, desiredDir)
+      let delta: Quaternion
+      if (d > 0.999999) {
+        delta = Quaternion.Identity()
+      } else if (d < -0.999999) {
+        let perp = Vector3.Cross(new Vector3(1, 0, 0), restDir)
+        if (perp.lengthSquared() < 1e-6) perp = Vector3.Cross(new Vector3(0, 1, 0), restDir)
+        perp.normalize()
+        delta = Quaternion.RotationAxis(perp, Math.PI)
+      } else {
+        const axis = Vector3.Cross(restDir, desiredDir).normalize()
+        const angle = Math.acos(Math.max(-1, Math.min(1, d)))
+        delta = Quaternion.RotationAxis(axis, angle)
+      }
+
+      // Compose: apply rest first, then swing delta in parent frame.
+      // Babylon convention a.multiply(b) = a * b, applied as "b first, then a".
+      return delta.multiply(restLocalRot)
+    }
+
+    // Run 2-bone IK on one leg of the active model so its foot reaches
+    // `footTarget` (world space). Adjusts Upper Leg + Lower Leg only;
+    // Foot bone keeps its current local rotation.
+    const runLegPlantIK = (side: 'L' | 'R', footTarget: Vector3) => {
+      const m = active()
+      const sk = m.skeleton
+      const upperBone = sk.bones.find((b) => b.name === `Upper Leg.${side}`)
+      const lowerBone = sk.bones.find((b) => b.name === `Lower Leg.${side}`)
+      const footBone = sk.bones.find((b) => b.name === `Foot.${side}`)
+      if (!upperBone || !lowerBone || !footBone) return
+      const upperNode = upperBone._linkedTransformNode as any
+      const lowerNode = lowerBone._linkedTransformNode as any
+      const footNode = footBone._linkedTransformNode as any
+      if (!upperNode || !lowerNode || !footNode) return
+
+      // Current world chain positions (post-Hips-translate).
+      upperNode.computeWorldMatrix(true)
+      lowerNode.computeWorldMatrix(true)
+      footNode.computeWorldMatrix(true)
+      const rootPos = upperNode.getAbsolutePosition().clone()
+      const midRestPos = lowerNode.getAbsolutePosition().clone()
+      const endRestPos = footNode.getAbsolutePosition().clone()
+
+      // Pole hint = character's forward direction (knee bends forward).
+      m.root.computeWorldMatrix(true)
+      const poleHint = m.root.getDirection(new Vector3(0, 0, -1)).normalize()
+
+      const { newMidPos, newEndPos } = solveTwoBoneIK(
+        rootPos, midRestPos, endRestPos, footTarget, poleHint,
+      )
+
+      // The bone's "child direction" in its OWN local frame = child's
+      // local position normalized.
+      const upperChildLocalDir = (lowerNode.position as Vector3).clone().normalize()
+      const lowerChildLocalDir = (footNode.position as Vector3).clone().normalize()
+
+      // Rest local rotations — the rig's authored "default" orientation
+      // for each bone, including its natural twist. We anchor IK to this
+      // so the bones don't roll/twist unpredictably when re-aimed.
+      const toRestQ = (arr: [number, number, number, number] | undefined) =>
+        arr ? new Quaternion(arr[0], arr[1], arr[2], arr[3]) : Quaternion.Identity()
+      const upperRestLocal = toRestQ(m.restPose[`Upper Leg.${side}`])
+      const lowerRestLocal = toRestQ(m.restPose[`Lower Leg.${side}`])
+
+      // ─── UPPER BONE ───
+      if (upperNode.parent) {
+        const wantedMidLocal = worldPosToParentLocal(upperNode.parent, newMidPos)
+        const upperLocalPos = upperNode.position as Vector3
+        upperNode.rotationQuaternion = buildSwingDeltaLocalRotation(
+          upperRestLocal, upperChildLocalDir, upperLocalPos, wantedMidLocal,
+        )
+      }
+
+      // ─── LOWER BONE ───
+      // Parent is Upper Leg — which just changed. Recompute its world.
+      upperNode.computeWorldMatrix(true)
+      if (lowerNode.parent) {
+        lowerNode.parent.computeWorldMatrix(true)
+        const wantedEndLocal = worldPosToParentLocal(lowerNode.parent, newEndPos)
+        const lowerLocalPos = lowerNode.position as Vector3
+        lowerNode.rotationQuaternion = buildSwingDeltaLocalRotation(
+          lowerRestLocal, lowerChildLocalDir, lowerLocalPos, wantedEndLocal,
+        )
+      }
+
+    }
+
     const translateSelectedBone = (axis: 'x' | 'y' | 'z', delta: number) => {
       if (!currentSelection) return
       if (!POSITION_BONES.includes(currentSelection)) return
       const bone = active().skeleton.bones.find((b) => b.name === currentSelection)
       const node = bone?._linkedTransformNode
       if (!node) return
+
+      // For Hips: capture feet world positions BEFORE we move, then run
+      // leg-plant IK AFTER so the feet visually stay where they were.
+      const isHips = currentSelection === 'Hips'
+      let plantedL: Vector3 | null = null
+      let plantedR: Vector3 | null = null
+      if (isHips) {
+        plantedL = getBoneWorld('Foot.L')
+        plantedR = getBoneWorld('Foot.R')
+      }
+
       const dir =
         axis === 'x' ? Vector3.Right()
         : axis === 'y' ? Vector3.Up()
         : Vector3.Forward()
       node.translate(dir, delta, Space.WORLD)
+
+      if (isHips) {
+        if (plantedL) runLegPlantIK('L', plantedL)
+        if (plantedR) runLegPlantIK('R', plantedR)
+      }
     }
 
     let activeAnimatables: Animatable[] = []
@@ -546,6 +700,21 @@ export function createEngine(
           const c = Color3.FromHexString(hex)
           m.diffuseColor = c
           m.ambientColor = c.scale(0.5)
+        }
+      },
+      // Diagnostic — read a bone's world position from the ACTIVE editor
+      // model only (avoids hero/opp same-named-bone confusion).
+      debugBoneWorld: (boneName: string) => {
+        const m = active()
+        const bone = m.skeleton.bones.find((b) => b.name === boneName)
+        const node = bone?._linkedTransformNode as any
+        if (!node) return null
+        node.computeWorldMatrix(true)
+        const p = node.getAbsolutePosition()
+        const q = node.rotationQuaternion ?? node.rotation.toQuaternion()
+        return {
+          worldPos: [+p.x.toFixed(4), +p.y.toFixed(4), +p.z.toFixed(4)],
+          localRot: [+q.x.toFixed(4), +q.y.toFixed(4), +q.z.toFixed(4), +q.w.toFixed(4)],
         }
       },
       // --- Multi-model management ---

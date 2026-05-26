@@ -204,17 +204,29 @@ export default function BoneControls() {
 
       {hasPositionControl && (
         <>
-          <div style={{ ...titleStyle, marginTop: 16 }}>CROUCH</div>
-          <div style={subtitleStyle}>body height offset (cm)</div>
+          <div style={{ ...titleStyle, marginTop: 16 }}>TRANSLATE</div>
+          <div style={subtitleStyle}>hips offset · feet stay planted (cm)</div>
           <div style={stepperColStyle}>
+            <Stepper
+              axis="x" label="X" color="#c44b4b"
+              value={pos ? pos.x * 100 : undefined} unit="cm" precision={1} step={POS_STEP_M}
+              enabled
+              onStep={(d) => (window as any).__editor?.translateSelectedBone?.('x', d)}
+            />
             <Stepper
               axis="y" label="Y" color="#3d9c3a"
               value={pos ? pos.y * 100 : undefined} unit="cm" precision={1} step={POS_STEP_M}
               enabled
               onStep={(d) => (window as any).__editor?.translateSelectedBone?.('y', d)}
             />
+            <Stepper
+              axis="z" label="Z" color="#3270c7"
+              value={pos ? pos.z * 100 : undefined} unit="cm" precision={1} step={POS_STEP_M}
+              enabled
+              onStep={(d) => (window as any).__editor?.translateSelectedBone?.('z', d)}
+            />
           </div>
-          <div style={hintStyle}>down = crouch · up = rise</div>
+          <div style={hintStyle}>Y = crouch · X = side · Z = fwd/back</div>
         </>
       )}
 
