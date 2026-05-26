@@ -10,7 +10,7 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 - ✅ **Multi-model editor** — two knight instances facing each other along X axis at world (50,0,0) and (51.5,0,0) (1.5m apart, locked). Active-model selector in left dash routes all bone-control / anim-preview to the selected one. Each model row has ✎ edit (rename + visibility toggle).
 - ✅ **Sync Play** — assign one anim per model and fire both simultaneously (`▶ Play both`) for combat practice / timing verification. Section sits above Animations in left dash.
 - ✅ **Two reset buttons** in right panel — Reset current model / Reset all models.
-- ✅ **Inverse Kinematics** — 2-bone analytical IK on each leg. Triggered when user translates the Hips bone (via stepper). Feet stay planted; knees bend forward (pole hint = model facing dir). Works across both models (active model only at a time). See "Hips translation with leg-plant IK" section below for the Babylon gotchas — lots of them.
+- ✅ **Inverse Kinematics on 5 bones** — 2-bone analytical IK shared across paths. **Hips** → both legs adapt so feet stay planted (crouch / lean / weight shift). **Hand.L / Hand.R** → arm IK reaches new hand world position (sword placement, reaches). **Foot.L / Foot.R** → leg IK reaches new foot world position (kick prep, lifting steps). All five share the same solver; pole hints differ. See "IK system" section below for the Babylon gotchas — lots of them.
 - ✅ **Locomotion = per-keyframe displacement** (NOT per-anim metadata, NOT Hips-X/Z promotion — both tried and rejected). Each keyframe in the animation builder has `pos X[ ] Y[ ] Z[ ]` cm inputs = where the body is at this keyframe relative to anim-start position. At playback, character's `root.position` is animated to those positions, transformed through root's rotation (so +Z = "character's forward"). Composes across anims: anim 2 starts from wherever anim 1 ended.
 - ✅ **Editor preview moves the editor knight** through the world (not just bones-in-place) so author sees the actual character motion. Reset snaps editor knight back to its starting world position.
 - ✅ **Always-visible BODY POSITION readout** in right panel (top, both Bones/Style modes) — live world-space cm coords relative to starting position. Updates every frame.
@@ -39,7 +39,9 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 
 ```
 duel-game/
-├── .claude/notes.md                     (this file)
+├── .claude/
+│   ├── notes.md                         (this file)
+│   └── settings.local.json              auto-allow Edit/Write inside .claude/ (no prompts)
 ├── public/
 │   ├── models/                          (GLBs, served as /models/*)
 │   │   ├── knight.glb                   reused for hero + opponent + editor puppet
@@ -244,9 +246,28 @@ scene.onBeforeRenderObservable.add(() => {
 - **Undo coalescing on Stepper**: rapid clicks or wheel notches within `UNDO_BURST_MS = 300` collapse into ONE undo entry. Implementation: `lastStepTime` ref + `beginActionMaybe()` checks elapsed time before calling `pushUndo`. Avoids filling the 40-slot undo stack on a single scroll gesture.
 - Below all controls: Undo + Redo side-by-side; Reset (full-width, red-tinted) below.
 
-### Hips translation with leg-plant IK (TRANSLATE section)
+### IK system — TRANSLATE-driven inverse kinematics on five bones
 
-When Hips is selected the right panel shows full **X / Y / Z** translation steppers. Every step kicks off **inverse kinematics on both legs** so the feet remain visually planted at their pre-translation world positions while the body shifts. Implementation lives in `src/editor/ik-solver.ts` + the `runLegPlantIK` helper in `engine.ts`. Locomotion (character-physically-moves-through-world) is still per-keyframe displacement (next section) — it's a different mechanism.
+`POSITION_BONES` in `src/editor/pose-store.ts` is the allow-list of bones that get the X / Y / Z TRANSLATE stepper:
+
+```ts
+['Hips', 'Hand.L', 'Hand.R', 'Foot.L', 'Foot.R']
+```
+
+Each runs a different IK mode but all share the same `solveTwoBoneIK` + `buildSwingDeltaLocalRotation` core in `engine.ts`:
+
+| Selected bone | Stepper translates | IK chain | Mode |
+|---|---|---|---|
+| Hips | Hips world position | Upper Leg + Lower Leg (both sides) | **Root-driven**: chain bends so feet stay at captured pre-translate world positions. Lets you crouch / lean / weight-shift without feet sliding. |
+| Hand.L / Hand.R | Hand world target | Upper Arm + Lower Arm (same side) | **End-effector**: arm bends to reach the new hand world position. Hand bone itself isn't translated — it follows the chain. Pole hint = model's local `-Y` (elbow droops). |
+| Foot.L / Foot.R | Foot world target | Upper Leg + Lower Leg (same side) | **End-effector**: leg bends to reach the new foot world position. Used for lifting a foot, stepping out, kick prep. Pole hint = model's local `+Z` (knee forward), same as Hips path. |
+
+For Hips path, see "Algorithm per step" below. For Hand/Foot end-effector paths:
+1. Read selected bone's current world position
+2. `target = current + axisVec * delta`
+3. Call `runArmIK(side, target)` or `runLegPlantIK(side, target)` — same internal solver, just different chain bones
+
+Locomotion (character-physically-moves-through-world) is still per-keyframe displacement (separate system below) — different mechanism, doesn't use IK.
 
 **Algorithm per step:**
 1. Before `node.translate(axis, delta, Space.WORLD)`, capture `Foot.L` and `Foot.R` world positions.
@@ -273,7 +294,11 @@ When Hips is selected the right panel shows full **X / Y / Z** translation stepp
 
 **Cache invalidation:** Reset (current model) and Reset All clear the chain-rest cache so IK re-anchors correctly. Same on `setActiveModel` switch (per-model IK).
 
-**Diagnostic harness:** `scripts/qa-ik-diagnose.mjs` — opens dev server in headless Chromium, switches to editor camera, selects Hips, translates by a known delta, dumps bone world positions before/after via `__editor.debugBoneWorld(name)`. Foot drift `[0, 0, 0]` = success. Add `window.__ikDebug = true` to surface internal solver values per IK call.
+**Diagnostic harnesses** (all headless Chromium against the dev server):
+- `scripts/qa-knight.mjs` — baseline editor-camera screenshot of both knights.
+- `scripts/qa-ik-diagnose.mjs` — Hips translate by a known delta, dump bone world positions before/after via `__editor.debugBoneWorld(name)`. Foot drift `[0, 0, 0]` = success. Add `window.__ikDebug = true` to surface internal solver values per IK call.
+- `scripts/qa-arm-ik.mjs` — Hand.R translate +30cm Z, verify hand drift matches input.
+- `scripts/qa-foot-ik.mjs` — Foot.L lift +20cm Y, verify foot drift matches input.
 
 - `POSITION_BONES = ['Hips']` in `src/editor/pose-store.ts` is the allow-list for translatable bones.
 - `snapshotPose` / `applyPose` capture/restore an optional `positions: Record<string, [x,y,z]>` alongside `rotations`. Only Hips Y is meant to be non-rest in practice.
@@ -461,7 +486,7 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - Combat_idle looping on both, pauses cleanly when other animations play
 - Arrow-key camera movement (no page scroll)
 - **Two-knight editor** facing off (Model 1 + Model 2 along X axis, 1.5m apart) — active-model selector routes all bone-control to one at a time. Each model row has ✎ rename + visibility toggle.
-- **In-browser pose/animation editor** with bone-pick, knob rotation, **Hips X/Y/Z translation with leg-plant IK (feet auto-stay-planted)**, anchors, animation builder w/ in-place Edit, **Initial Pose virtual entry**, **per-animation Initial Pose dropdown** (snaps model before keyframes), per-keyframe X/Y/Z displacement inputs for locomotion (2-row UI), BODY POSITION live readout in right panel, editor preview that physically moves the knight, undo+redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, with burst-coalescing for stepper), library persistence (rotations + positions + displacement + initialPoseId), import-baked, per-character key bindings
+- **In-browser pose/animation editor** with bone-pick, knob rotation, **IK-driven X/Y/Z translation on 5 bones (Hips → leg-plant; Hand.L/R → arm reach; Foot.L/R → leg reach)**, anchors, animation builder w/ in-place Edit, **Initial Pose virtual entry**, **per-animation Initial Pose dropdown** (snaps model before keyframes), per-keyframe X/Y/Z displacement inputs for locomotion (2-row UI), BODY POSITION live readout in right panel, editor preview that physically moves the knight, undo+redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, with burst-coalescing for stepper), library persistence (rotations + positions + displacement + initialPoseId), import-baked, per-character key bindings
 - **Sync Play** section — pick one anim per model, fire both at once for combat practice
 - **Style tab** (right panel) — recolor every material slot on editor knight, Reset to defaults
 - **Two reset buttons** — current model only OR all models
@@ -488,7 +513,7 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 6. **Virtual list entries beat stateful "system" entries.** Initial Position anchor lives in render-time computed `displayedAnchors`, not React state. Eliminated a race condition between fetch hydrate + editor-ready probe.
 7. **Dev-only Vite middleware is the cheap way to read/write JSON from the browser** during local dev. `configureServer` + `app.use` + check `req.url`. Won't survive prod build — fine for an author-time tool.
 8. **3-frame imports of complex baked animations look broken.** Not a bug — slerp limitation. 5+ is the user's working minimum for sword_atk01.
-9. **Bone-translation scope must be an allow-list, not a free-for-all.** `POSITION_BONES = ['Hips']` gates `translateSelectedBone` so dragging a Lower Arm bone can't stretch the forearm. Leaving the schema able to carry positions for other bones costs nothing — UI just won't render the controls until a bone is allow-listed.
+9. **Bone-translation scope must be an allow-list, not a free-for-all.** `POSITION_BONES = ['Hips', 'Hand.L', 'Hand.R', 'Foot.L', 'Foot.R']` gates `translateSelectedBone` so dragging a Lower Arm bone can't stretch the forearm — only end-effectors and Hips run IK. UI auto-shows the TRANSLATE section for any listed bone.
 10. **Wheel-scroll events on React `onWheel` are passive by default** in modern browsers — `preventDefault` is a no-op. To get a stepper that consumes the wheel without scrolling the page, attach via `addEventListener('wheel', fn, { passive: false })` in a useEffect.
 11. **Burst-coalescing prevents undo-stack DoS.** A 30-notch wheel scroll = ONE undo entry, not 30. Implementation: only `pushUndo` when the previous step was >300ms ago (`UNDO_BURST_MS`). Same trick would apply to keyboard-held auto-repeat.
 12. **Edit-in-place via the same draft form, not a separate "edit" mode.** When user clicks ✎ on an animation, load name + keyframes into the existing builder UI with an `editingId` flag. Save commits in place (no duplicate), Cancel discards. One UI surface, two modes. Header text flips `New Animation` ↔ `Edit Animation`.

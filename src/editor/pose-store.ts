@@ -7,9 +7,12 @@ import { Skeleton } from '@babylonjs/core'
 // limbs can't be stretched.
 // Bones that expose the TRANSLATE stepper. Hips drives leg-plant IK
 // (translate the chain root, legs adapt so feet stay planted). Hand.L/R
-// drive arm IK as end-effectors (translate the hand, arm chain bends
-// to reach). Feet TBD — would similarly be end-effectors for leg chain.
-export const POSITION_BONES: readonly string[] = ['Hips', 'Hand.L', 'Hand.R']
+// drive arm IK as end-effectors (translate the hand, arm chain bends to
+// reach). Foot.L/R drive leg IK as end-effectors (lift the foot, leg
+// chain bends to reach).
+export const POSITION_BONES: readonly string[] = [
+  'Hips', 'Hand.L', 'Hand.R', 'Foot.L', 'Foot.R',
+]
 
 export type Pose = {
   id: string

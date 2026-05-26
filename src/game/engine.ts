@@ -496,6 +496,13 @@ export function createEngine(
       const isHips = currentSelection === 'Hips'
       const isHandL = currentSelection === 'Hand.L'
       const isHandR = currentSelection === 'Hand.R'
+      const isFootL = currentSelection === 'Foot.L'
+      const isFootR = currentSelection === 'Foot.R'
+
+      const axisVec =
+        axis === 'x' ? new Vector3(1, 0, 0)
+        : axis === 'y' ? new Vector3(0, 1, 0)
+        : new Vector3(0, 0, 1)
 
       // Hand IK path — compute new world target and run arm IK.
       // (Don't translate the Hand bone itself; it follows the chain.)
@@ -503,12 +510,19 @@ export function createEngine(
         const side: 'L' | 'R' = isHandL ? 'L' : 'R'
         const current = getBoneWorld(`Hand.${side}`)
         if (!current) return
-        const axisVec =
-          axis === 'x' ? new Vector3(1, 0, 0)
-          : axis === 'y' ? new Vector3(0, 1, 0)
-          : new Vector3(0, 0, 1)
-        const target = current.add(axisVec.scale(delta))
-        runArmIK(side, target)
+        runArmIK(side, current.add(axisVec.scale(delta)))
+        return
+      }
+
+      // Foot IK path — same idea, but on the leg chain. Reuses the
+      // exact same `runLegPlantIK` we use for Hips translation; only the
+      // target differs (current foot + delta vs. captured pre-translate
+      // foot pos).
+      if (isFootL || isFootR) {
+        const side: 'L' | 'R' = isFootL ? 'L' : 'R'
+        const current = getBoneWorld(`Foot.${side}`)
+        if (!current) return
+        runLegPlantIK(side, current.add(axisVec.scale(delta)))
         return
       }
 
