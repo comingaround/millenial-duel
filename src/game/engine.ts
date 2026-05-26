@@ -384,8 +384,11 @@ export function createEngine(
       const endRestPos = footNode.getAbsolutePosition().clone()
 
       // Pole hint = character's forward direction (knee bends forward).
+      // For this rig, the model's local +Z is its forward (confirmed
+      // empirically — Model 1 with Y=-π/2 maps local +Z → world +X,
+      // which matches its visual facing toward Model 2).
       m.root.computeWorldMatrix(true)
-      const poleHint = m.root.getDirection(new Vector3(0, 0, -1)).normalize()
+      const poleHint = m.root.getDirection(new Vector3(0, 0, 1)).normalize()
 
       const { newMidPos, newEndPos } = solveTwoBoneIK(
         rootPos, midRestPos, endRestPos, footTarget, poleHint,

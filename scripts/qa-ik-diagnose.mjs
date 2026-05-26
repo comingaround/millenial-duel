@@ -64,9 +64,9 @@ const before = await inspect()
 console.log('BEFORE:', JSON.stringify(before, null, 2))
 await page.screenshot({ path: join(OUT_DIR, 'ik-before.png') })
 
-// Apply Hips Y -10cm
+// Apply Hips Y -30cm (one shot) to test bigger crouch
 await page.evaluate(() => {
-  ;(window).__editor.translateSelectedBone('y', -0.10)
+  ;(window).__editor.translateSelectedBone('y', -0.30)
 })
 await page.waitForTimeout(300)
 
