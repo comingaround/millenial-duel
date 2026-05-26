@@ -2,6 +2,7 @@ import '@babylonjs/loaders/glTF'
 import {
   AbstractMesh,
   Color3,
+  Matrix,
   Mesh,
   Scene,
   SceneLoader,
@@ -79,7 +80,11 @@ const FALLBACK = new Color3(0.55, 0.55, 0.55)
 // instances render with the same colors and the Style panel affects both).
 // One Creator part — a geometric primitive parented to a bone on the
 // Custom model. Author by adding/resizing via the Creator tab.
-export type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule'
+// 'clone' = mimic the actual mesh geometry on a Model 1 bone (triangles
+// extracted by skinning weights, baked into bone-local space, then
+// re-parented to the Custom model's same-named bone). All other shapes
+// are procedural primitives.
+export type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule' | 'clone'
 export type CreatorPart = {
   id: string
   boneName: string
@@ -107,6 +112,11 @@ export type ModelInstance = {
   restPose: Record<string, [number, number, number, number]>
   restPositions: Record<string, [number, number, number]>
   restWorldPositions: Record<string, [number, number, number]>
+  // Snapshotted at load (before any user pose). Used by the Creator's
+  // 'clone' shape to express Model 1's skinned vertices in bone-local
+  // space at rest. Keyed by bone name / mesh uniqueId respectively.
+  restBoneWorldMatrices: Map<string, Matrix>
+  restMeshWorldMatrices: Map<number, Matrix>
   position: Vector3            // initial world position (for Reset)
   // Map<partId, instance> — only populated on the Custom model.
   creatorParts: Map<string, CreatorPartInstance>
@@ -188,6 +198,8 @@ async function loadKnightInstance(
   const restPose: Record<string, [number, number, number, number]> = {}
   const restPositions: Record<string, [number, number, number]> = {}
   const restWorldPositions: Record<string, [number, number, number]> = {}
+  const restBoneWorldMatrices = new Map<string, Matrix>()
+  const restMeshWorldMatrices = new Map<number, Matrix>()
   root.computeWorldMatrix(true)
   for (const bone of skeleton.bones) {
     const node = bone._linkedTransformNode
@@ -196,13 +208,20 @@ async function loadKnightInstance(
       node.rotationQuaternion ?? node.rotation.toQuaternion()
     const q = node.rotationQuaternion
     restPose[bone.name] = [q.x, q.y, q.z, q.w]
+    node.computeWorldMatrix(true)
+    restBoneWorldMatrices.set(bone.name, node.getWorldMatrix().clone())
     if (POSITION_BONES.includes(bone.name)) {
       const p = node.position
       restPositions[bone.name] = [p.x, p.y, p.z]
-      node.computeWorldMatrix(true)
       const wp = node.getAbsolutePosition()
       restWorldPositions[bone.name] = [wp.x, wp.y, wp.z]
     }
+  }
+  // Capture every loaded mesh's world matrix at rest — Creator's 'clone'
+  // shape needs to convert mesh-local vertex positions → world → bone-local.
+  for (const m of result.meshes) {
+    m.computeWorldMatrix(true)
+    restMeshWorldMatrices.set(m.uniqueId, m.getWorldMatrix().clone())
   }
 
   return {
@@ -214,6 +233,8 @@ async function loadKnightInstance(
     restPose,
     restPositions,
     restWorldPositions,
+    restBoneWorldMatrices,
+    restMeshWorldMatrices,
     position: position.clone(),
     creatorParts: new Map<string, CreatorPartInstance>(),
   }

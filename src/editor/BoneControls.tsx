@@ -15,7 +15,7 @@ type PanelMode = 'bones' | 'style' | 'creator'
 type EditorMaterial = { name: string; hex: string }
 
 // Mirror of CreatorPart from editor-scene.ts (avoid cross-import cycle).
-type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule'
+type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule' | 'clone'
 type CreatorPart = {
   id: string
   boneName: string
@@ -560,7 +560,7 @@ function categorize(allBones: string[]): Array<{ name: string; bones: string[] }
 // primitives to bones. Gated to active model = 2 (Custom).
 // ──────────────────────────────────────────────────────────────────
 const CUSTOM_MODEL_IDX = 2
-const CREATOR_SHAPES: CreatorShape[] = ['sphere', 'box', 'cylinder', 'capsule']
+const CREATOR_SHAPES: CreatorShape[] = ['sphere', 'box', 'cylinder', 'capsule', 'clone']
 
 function CreatorTab({
   activeModelIdx,
@@ -685,7 +685,7 @@ function PartRow({ part, bones, onChange }: { part: CreatorPart; bones: string[]
         <span style={partDelStyle} onClick={del} title="Delete">×</span>
       </div>
       <PartTripleRow
-        label="size"
+        label={part.shape === 'clone' ? 'size %' : 'size'}
         x={sx} y={sy} z={sz}
         onSet={(axis, cm) => {
           const next: [number, number, number] = [...part.scale]

@@ -1210,5 +1210,27 @@
       ]
     }
   ],
-  "creatorParts": []
+  "creatorParts": [
+    {
+      "id": "part_1779799412295_7r1r",
+      "boneName": "Chest",
+      "shape": "clone",
+      "scale": [
+        0.8,
+        1,
+        1
+      ],
+      "offset": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#d9534f"
+    }
+  ]
 }

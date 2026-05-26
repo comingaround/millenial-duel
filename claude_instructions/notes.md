@@ -1,13 +1,19 @@
 # Duel Game — Project Notes
 
-First-person sword-and-shield duel game (KCD-style). Web first, mobile later via Capacitor. Currently a working scene with hero (FP) + opponent (3rd-person target) and the first two combat animations (sword strike + shield block) on both characters. **Custom in-browser pose/animation editor is now operational** — used to author new attack/block animations bound to per-character keys, persisted to a JSON library.
+First-person sword-and-shield duel game (KCD-style). Web first, mobile later via Capacitor. Currently a working scene with hero (FP) + opponent (3rd-person target) and the first two combat animations (sword strike + shield block) on both characters. **Custom in-browser pose/animation editor is now operational** — used to author new attack/block animations bound to per-character keys, persisted to a JSON library. **Character Creator panel** lets the user build a third "Custom" model from geometric primitives + mesh clones of Model 1's body parts.
+
+## Folder conventions (2026-05-26 onward)
+
+- `claude_instructions/` (this folder) — Claude's project notes, lessons, design decisions. Edit freely.
+- `.claude/` — settings only (`settings.local.json`). Do NOT put working notes here.
 
 ## ⚠️ Read this first (state after compaction)
 
 - ✅ Duel scene (hero + opponent + 2 baked-key animations) — same as before
 - ✅ Custom **pose/animation editor** at scene `(50, 0, 0)` — separate knight rig used purely as a posing puppet
 - ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips X/Y/Z TRANSLATE stepper with leg-plant IK (feet stay glued to their world positions while body shifts)**, editable typed input + scroll-wheel + ± buttons, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, **Initial Position virtual pose** (top of Poses list, system, can't delete), virtual Initial Position anchor, rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, **animations can pick an Initial Pose** that the model snaps to before keyframes play, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
-- ✅ **Multi-model editor** — two knight instances facing each other along X axis at world (50,0,0) and (51.5,0,0) (1.5m apart, locked). Active-model selector in left dash routes all bone-control / anim-preview to the selected one. Each model row has ✎ edit (rename + visibility toggle).
+- ✅ **Three-model editor** — Model 1 + Model 2 + Custom along X axis at (50,0,0), (51.5,0,0), (53.0,0,0). Custom is skeleton-only (all GLB meshes hidden via `isVisible = false` flagged on load by `loadKnightInstance(..., hideAllMeshes=true)`) — user builds the body part-by-part via the Creator tab. Active-model selector in left dash routes all bone-control / anim-preview to the selected one. Each model row has ✎ edit (rename + visibility toggle).
+- ✅ **Character Creator tab** (right panel, third tab alongside Bones + Style) — only operational when active model is Custom (idx 2). Adds primitive shapes (sphere/box/cylinder/capsule) OR `clone` (exact mesh extraction from Model 1) onto any ACTIVE_BONE. Stepper-based editing (size/offset/rotation in cm + degrees + colour picker per part). Bone-retarget dropdown on each part. Persists to library.json. See "Character Creator" section below.
 - ✅ **Sync Play** — assign one anim per model and fire both simultaneously (`▶ Play both`) for combat practice / timing verification. Section sits above Animations in left dash.
 - ✅ **Two reset buttons** in right panel — Reset current model / Reset all models.
 - ✅ **Inverse Kinematics on 5 bones** — 2-bone analytical IK shared across paths. **Hips** → both legs adapt so feet stay planted (crouch / lean / weight shift). **Hand.L / Hand.R** → arm IK reaches new hand world position (sword placement, reaches). **Foot.L / Foot.R** → leg IK reaches new foot world position (kick prep, lifting steps). All five share the same solver; pole hints differ. See "IK system" section below for the Babylon gotchas — lots of them.
@@ -40,8 +46,9 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 ```
 duel-game/
 ├── .claude/
-│   ├── notes.md                         (this file)
-│   └── settings.local.json              auto-allow Edit/Write inside .claude/ (no prompts)
+│   └── settings.local.json              blanket Edit + Write allow — no prompts
+├── claude_instructions/
+│   └── notes.md                         (this file)
 ├── public/
 │   ├── models/                          (GLBs, served as /models/*)
 │   │   ├── knight.glb                   reused for hero + opponent + editor puppet
@@ -72,12 +79,13 @@ duel-game/
 │   │       ├── opponent.ts              loads knight.glb, exposes playSlash/playBlock + playCustomAnimation
 │   │       └── hero.ts                  loads knight.glb again, head hidden for FP, exposes playCustomAnimation
 │   ├── editor/                          ← in-browser pose/animation editor
-│   │   ├── editor-scene.ts              loads editor knight at (50,0,0), exports ACTIVE_BONES (19)
+│   │   ├── editor-scene.ts              loads 3 knight instances at x=50/51.5/53, exports ACTIVE_BONES (19), CreatorPart types
 │   │   ├── bone-picker.ts               yellow spheres at active bones, click-to-select (no drag)
 │   │   ├── pose-store.ts                snapshotPose / applyPose helpers
 │   │   ├── animation-player.ts          builds Babylon Animations from anchor keyframes
-│   │   ├── BoneControls.tsx             right panel: bone tree + 3 rotation knobs
-│   │   ├── EditorPanel.tsx              left dashboard: poses/anchors/animations + import modal
+│   │   ├── creator-parts.ts             Character Creator part lifecycle (primitives + clone extraction)
+│   │   ├── BoneControls.tsx             right panel: Bones / Style / Creator tabs
+│   │   ├── EditorPanel.tsx              left dashboard: poses/anchors/animations + import modal + creator-parts persistence
 │   │   └── gizmo.ts                     (legacy GizmoManager wiring, unused after drag removal)
 │   └── ui/
 │       └── CameraToggle.tsx             bottom-right Free Roam / Locked / Editor toggle
@@ -415,6 +423,77 @@ The Initial Position anchor used to be stored in state and inserted by both an a
 - `window.__editor` = `{snapshot, apply, reset, resetAll, selectBone, getSelectedBone, addBoneSelectListener, rotateSelectedBone, translateSelectedBone, getSelectedBoneEuler, getSelectedBonePosition, hasPositionControl, getBodyPosition, setBonePickerActive, getEditorMaterials, setEditorMaterialColor, resetEditorMaterials, playAnimation, playAnimationOnModel, stopAnimation, pushUndo, undo, redo, canUndo, canRedo, getInitialAnchor, listBakedAnimations, importBakedAnimation, getModels, getActiveModelIndex, setActiveModel, setModelVisible, getModelVisible, debugBoneWorld}`
 - `window.__customAnims` = resolved custom animations `{name, heroKey, oppKey, resolved: [{anchor:{rotations, positions?}, time}]}` — `positions` flows through for Hips translation playback
 
+## Character Creator (Custom model — index 2)
+
+A third knight instance is loaded as **skeleton-only** (every GLB renderable mesh is hidden via `isVisible = false`). The user builds the body up part-by-part by attaching primitives or mesh clones to bones via a `Creator` tab in the right panel. Each part is independently editable (size, offset, rotation, colour) and follows the bone through any pose change.
+
+### Two flavours of part
+
+1. **Primitives** (`sphere`, `box`, `cylinder`, `capsule`): `MeshBuilder.Create*` at unit size, parented to the bone's `_linkedTransformNode`, scaling/position normalised by `parent.absoluteScaling` so user-entered cm values map 1:1 to world cm. (Without normalisation the GLB's baked armature scale makes "15 cm" render as metres.)
+2. **`clone` shape**: extracts the actual triangles from Model 1 that are skinned to the target bone. Vertices are baked into bone-local-skeleton-relative space via `bone.getAbsoluteInverseBindMatrix()` (the canonical Babylon skinning math), then re-attached to the Custom model's same bone via **`mesh.attachToBone(targetBone, refMesh)`** — Babylon's own API for bone-following meshes. Result: visually identical to Model 1's geometry, follows the Custom bone through any pose/animation.
+
+### Why `attachToBone` instead of `mesh.parent = linkedTransformNode`
+
+For PRIMITIVES, `mesh.parent = bone._linkedTransformNode` works fine — the linked TransformNode's world matrix matches the on-screen bone position. But for CLONES it doesn't: the linked TransformNode's world chain integrates Blender→glTF coordinate-conversion transforms (extreme scale + translation that net out via skinning but stay visible on naive parenting). Symptom seen during development: extracted geometry's world bounds landed at `(-945, -5733, 7289)` instead of near `(53, 1.6, 0)`. Switching to `mesh.attachToBone(bone, refMesh)` + extracting via `getAbsoluteInverseBindMatrix()` is the canonical fix.
+
+### Triangle ownership rule (clone extraction)
+
+Per-vertex: assigned to a bone if **any** of its 4 skinning weights on that bone is ≥ 0.30. Per-triangle: included if **any** of its 3 vertices is assigned. Tradeoffs: looser than strict-dominance (small overlap at bone-boundary seams between neighbouring clones) but means no holes anywhere. The strict "all 3 verts must own this bone" rule produced 0 triangles for many bones (boundary verts split ~50/50 between adjacent bones → dominant winner is the neighbour).
+
+### Per-part data shape (`CreatorPart`)
+
+```ts
+{
+  id: string                  // crypto.randomUUID
+  boneName: string            // e.g. 'Head', 'Upper Arm.L'
+  shape: 'sphere' | 'box' | 'cylinder' | 'capsule' | 'clone'
+  scale: [x, y, z]            // primitives: metres. clone: multiplier (1.0 = native)
+  offset: [x, y, z]           // metres in bone-local
+  rotation: [x, y, z]         // Euler degrees
+  color: string               // #rrggbb (own StandardMaterial, never shared)
+}
+```
+
+UI: `size` row shows `cm` for primitives, `size %` for clones (because clone scale is a multiplier). All other rows (offset, rotation) are the same units across shapes.
+
+### Engine API (`window.__editor`)
+
+- `addCreatorPart(shape, boneName) → id | null` — gated on activeIdx === 2.
+- `updateCreatorPart(id, patch)` — partial mutate. Shape-change rebuilds. Bone-change on a clone re-extracts geometry; primitive just reparents.
+- `deleteCreatorPart(id)` — disposes mesh + material.
+- `getCreatorParts() → CreatorPart[]` — for persistence save.
+- `setCreatorParts(parts[])` — bulk replace for hydrate. Skips bones that don't exist.
+- `addCreatorPartsListener(fn) → unsub` — fires on any mutation. EditorPanel subscribes to bump `creatorPartsRev` state and trigger the debounced save.
+- `getCreatorPartsRevision() → number` — monotonic counter.
+
+### Persistence
+
+Library JSON gains `creatorParts: CreatorPart[]`. EditorPanel.tsx:
+- Hydrate: polls `__editor.setCreatorParts` until ready (createEditorScene is async), retries every 200ms up to 10s.
+- Save: includes `__editor.getCreatorParts()` in the 500ms debounced POST payload. `creatorPartsRev` is a dep on the save useEffect so engine-side mutations trigger persistence even though parts live OUTSIDE React state.
+
+The Vite dev plugin (`vite-plugins/animation-saver.ts`) writes the payload verbatim; default-GET fallback seeds `creatorParts: []` for new installs.
+
+### Skeleton-only model load
+
+`loadKnightInstance(..., hideAllMeshes = true)`:
+- Loads the full GLB as normal (all 8 skeletons, all animations stopped, rest pose captured).
+- After material assignment, walks `result.meshes` and sets `isVisible = false` on every `Mesh` with vertices.
+- Bones / TransformNodes / skeletons are untouched, so the Custom model still poses correctly through the standard editor path. Parts parented to bones render against the otherwise-empty hierarchy.
+
+### Implementation files
+
+- `src/editor/editor-scene.ts` — Model 3 load + `CreatorShape` + `CreatorPart` + `CreatorPartInstance` types. ModelInstance also carries `creatorParts: Map<string, CreatorPartInstance>` plus the (mostly-legacy) `restBoneWorldMatrices` + `restMeshWorldMatrices` (kept around even though `getAbsoluteInverseBindMatrix` superseded their use).
+- `src/editor/creator-parts.ts` — `createPartMesh`, `updatePartMesh`, `disposePartMesh`, `defaultPartFor`, `extractBoneGeometry`. Primitive vs clone branching lives here.
+- `src/game/engine.ts` — exposes the API on `window.__editor`. Maintains `creatorPartsRev` counter + listener list.
+- `src/editor/BoneControls.tsx` — `CreatorTab`, `PartRow`, `PartTripleRow`, `PartNumInput` components. Shape select + bone select + Add row. Per-part row has a bone-retarget dropdown.
+- `src/editor/EditorPanel.tsx` — persistence hydrate + save.
+- `scripts/qa-creator.mjs` — Playwright round-trip QA (add 4 parts → edit one → reload → verify persistence).
+
+### UI styling lessons
+
+- The Add row had a shape select + bone select + Add button competing for ~240px of panel width. Long bone names like "Upper Leg.L" exceed a 88px-fixed select. Final layout: selects are `flex: 1 1 80px` (share remaining space, shrink past content via `min-width: 0`), button is `flex: 0 0 auto` (fixed, never gets pushed off), row is `flex-wrap: wrap` (drops button to second line on extreme narrow widths). Same pattern for PartRow header.
+
 ## Asset pipeline (FBX → GLB)
 
 All character/building/tree models came as FBX or OBJ from CGTrader. We convert to GLB at scaffold time:
@@ -485,7 +564,8 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - All combat actions are user-authored animations bound to user-chosen keys via the editor (no hardcoded Q/U/Space/Enter anymore)
 - Combat_idle looping on both, pauses cleanly when other animations play
 - Arrow-key camera movement (no page scroll)
-- **Two-knight editor** facing off (Model 1 + Model 2 along X axis, 1.5m apart) — active-model selector routes all bone-control to one at a time. Each model row has ✎ rename + visibility toggle.
+- **Three-model editor** (Model 1 + Model 2 + Custom along X axis at 50 / 51.5 / 53). Custom is skeleton-only — built up via the Character Creator tab. Active-model selector routes all bone-control to one at a time. Each model row has ✎ rename + visibility toggle.
+- **Character Creator** — adds primitives (sphere/box/cylinder/capsule) OR mesh clones from Model 1 onto any active bone of the Custom model. Per-part stepper editing (size/offset/rotation/colour) + bone retargeting. Clones use `bone.getAbsoluteInverseBindMatrix()` + `mesh.attachToBone()` so geometry follows the bone correctly through any pose. Persists to library.json.
 - **In-browser pose/animation editor** with bone-pick, knob rotation, **IK-driven X/Y/Z translation on 5 bones (Hips → leg-plant; Hand.L/R → arm reach; Foot.L/R → leg reach)**, anchors, animation builder w/ in-place Edit, **Initial Pose virtual entry**, **per-animation Initial Pose dropdown** (snaps model before keyframes), per-keyframe X/Y/Z displacement inputs for locomotion (2-row UI), BODY POSITION live readout in right panel, editor preview that physically moves the knight, undo+redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, with burst-coalescing for stepper), library persistence (rotations + positions + displacement + initialPoseId), import-baked, per-character key bindings
 - **Sync Play** section — pick one anim per model, fire both at once for combat practice
 - **Style tab** (right panel) — recolor every material slot on editor knight, Reset to defaults
@@ -502,6 +582,32 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - WASD free-roam locomotion in FP mode — input-driven `root.position` translation + walk-cycle anim on top (decoupled from the per-keyframe-displacement system, which is for discrete moves)
 - Mouse-look for hero in Locked camera (currently click-drag)
 - Production-safe persistence (current `/api/animations` is dev-only Vite middleware)
+
+## Lessons captured (Character Creator session, 2026-05-26)
+
+C1. **Babylon GLB rigs have TWO bone-position systems that DON'T match.** `bone._linkedTransformNode.getWorldMatrix()` reflects the scene-graph hierarchy with Blender→glTF conversion transforms baked in (extreme scale + translation values). `bone.getAbsoluteInverseBindMatrix()` reflects the canonical skinning math actually used by the shader. For "parent a static primitive to a bone", linkedTransformNode works fine. For "extract skinned vertices into bone-local space and re-attach", you MUST use `getAbsoluteInverseBindMatrix()` + `attachToBone(bone, refMesh)` — the canonical Babylon API. Naive parenting put extracted geometry at world bounds `(-945, -5733, 7289)`.
+
+C2. **`mesh.attachToBone(bone, referenceMesh)` is the canonical API for bone-following non-skinned meshes.** Babylon handles the per-frame world-matrix recompute via the bone + refMesh combo. The refMesh's world matrix anchors the bone-attached geometry into scene world space. Pick ANY skinned mesh on the target model that uses a skeleton containing the bone.
+
+C3. **Multi-skin GLBs have one inverse-bind matrix PER SKIN PER BONE.** When extracting vertices from multiple skinned meshes that all share a "Head" bone, fetch the per-mesh skeleton's bone and use ITS `getAbsoluteInverseBindMatrix()` — different skins may have subtly different bind matrices.
+
+C4. **Triangle-ownership filtering: prefer "any vertex ≥ threshold" over "all 3 verts dominant."** The strict rule produces clean partitions with seams; the loose rule produces overlapping coverage with no gaps. For visual extraction (e.g. "the head shape"), overlap is harmless. For mesh decomposition (each tri owned by exactly one bone), strict is needed.
+
+C5. **Parent-scale normalisation is needed for primitives but NOT for clones.** Primitives' vertex positions are in the mesh's own local space (created at unit size); when parented to a bone with armature scale 100x baked in, a `mesh.scaling = 0.15` renders as 15m world. Divide user-meters by `parent.absoluteScaling` before assignment. Clones' vertices are already in bone-local-skeleton space via the inverse-bind transform, so their scale is a direct multiplier (1.0 = native). Offsets are normalised in both cases (offsets are always "user-meters in world").
+
+C6. **`alwaysSelectAsActiveMesh = true` for bone-attached dynamic meshes.** Without it, Babylon's frustum-culling pass can intermittently hide a mesh whose bounding info hasn't refreshed since the bone moved. The performance hit is negligible for a handful of creator parts.
+
+C7. **Display-vs-storage unit mismatch is fine if labels make it explicit.** Primitive `scale` is stored in metres and displayed × 100 as cm. Clone `scale` is stored as a multiplier (1.0) and displayed × 100 as "%". Same input field, different label. The math just works because 100 ÷ 100 = 1.0 in both cases — the user reads "100" as "100 cm" or "100 %" depending on the row label.
+
+C8. **Skeleton-only model load = `m.isVisible = false` on every renderable Mesh.** Bones / TransformNodes / skeleton hierarchy are untouched. Parts parented to bones render against an otherwise-empty hierarchy. Costs near-zero — Babylon skips the hidden meshes in the render pass but `skeleton.prepare()` still runs (for any bones that something IS parented to).
+
+C9. **React state vs engine state for "lives outside React but needs to trigger persistence."** Creator parts live on the engine (Map on each ModelInstance). To trigger the debounced save useEffect when parts mutate, expose an `addCreatorPartsListener(fn) → unsub` API + bump a React `creatorPartsRev` counter on every event → list it in the save effect's dep array. The PARTS themselves never enter React state; only a tick counter does. Clean separation.
+
+C10. **Engine async-init + persistence hydrate need a retry loop.** `createEditorScene` is async (GLB load). The library.json fetch may resolve before the editor is ready. Pattern: try to apply immediately; if `__editor.setCreatorParts` doesn't exist yet, poll every 200ms up to 10s. Same pattern works for any "wait for engine to register an API after initial mount."
+
+C11. **Flexbox layout for narrow side panels.** When fitting "shape select + bone select + Add button" into a ~240px column with long item names: selects get `flex: 1 1 80px` + `min-width: 0` (share remaining, can shrink past content); button gets `flex: 0 0 auto` (fixed, never pushed off); row gets `flex-wrap: wrap` (button drops to second line gracefully on extreme narrow widths). Long names truncate visually; the dropdown still shows them in full.
+
+C12. **Don't delete diagnostic console.logs after first success.** The `[creator] clone 'Head': extracted 1116 triangles, 688 vertices` log paid for itself twice during debugging — once to confirm extraction was working at all, once to confirm world-bound math was off. Keep them in until the feature stabilises in production use.
 
 ## Lessons captured (session ending 2026-05-21)
 

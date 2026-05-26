@@ -856,19 +856,20 @@ export function createEngine(
       },
 
       // ─── Character Creator (Model 3 / Custom) ────────────────────
-      // Add a geometric primitive to a bone on the Custom model. Returns
-      // the new part's id (or null if the bone wasn't found / Custom
-      // model not loaded). Gated to Custom (index 2) — no-op otherwise.
+      // Add a geometric primitive (or geometry clone) to a bone on the
+      // Custom model. Returns the new part's id (or null if the bone
+      // wasn't found / Custom model not loaded). Gated to Custom (idx 2).
+      // For shape='clone', Model 1 is used as the geometry source.
       addCreatorPart: (shape: CreatorShape, boneName: string): string | null => {
         const customIdx = 2
         if (customIdx >= ed.models.length) return null
-        const m = ed.models[customIdx]
-        const bone = m.skeleton.bones.find((b) => b.name === boneName)
-        const parentNode = bone?._linkedTransformNode
-        if (!parentNode) return null
+        const customModel = ed.models[customIdx]
+        // Validate the bone exists on the Custom rig before constructing
+        // the part — saves the rest of the pipeline from a sentinel value.
+        if (!customModel.skeleton.bones.find((b) => b.name === boneName)) return null
         const part = defaultPartFor(boneName, shape)
-        const inst = createPartMesh(scene, part, parentNode as any)
-        m.creatorParts.set(part.id, inst)
+        const inst = createPartMesh(scene, part, customModel, ed.models[0])
+        customModel.creatorParts.set(part.id, inst)
         bumpCreatorParts()
         return part.id
       },
@@ -876,21 +877,13 @@ export function createEngine(
       updateCreatorPart: (id: string, patch: Partial<CreatorPart>) => {
         const customIdx = 2
         if (customIdx >= ed.models.length) return
-        const m = ed.models[customIdx]
-        const inst = m.creatorParts.get(id)
+        const customModel = ed.models[customIdx]
+        const inst = customModel.creatorParts.get(id)
         if (!inst) return
-        // Bone change → reparent. The updatePartMesh helper doesn't
-        // handle this case (different parent node), so do it inline.
-        if (patch.boneName && patch.boneName !== inst.data.boneName) {
-          const bone = m.skeleton.bones.find((b) => b.name === patch.boneName)
-          const parentNode = bone?._linkedTransformNode
-          if (parentNode) {
-            inst.mesh.parent = parentNode as any
-            inst.data.boneName = patch.boneName
-          }
-        }
-        const next = updatePartMesh(scene, inst, patch)
-        m.creatorParts.set(id, next)
+        // Reparenting + clone re-extraction is handled inside updatePartMesh
+        // (it knows whether the part is primitive vs clone).
+        const next = updatePartMesh(scene, inst, patch, customModel, ed.models[0])
+        customModel.creatorParts.set(id, next)
         bumpCreatorParts()
       },
 
@@ -917,15 +910,13 @@ export function createEngine(
       setCreatorParts: (parts: CreatorPart[]) => {
         const customIdx = 2
         if (customIdx >= ed.models.length) return
-        const m = ed.models[customIdx]
-        for (const inst of m.creatorParts.values()) disposePartMesh(inst)
-        m.creatorParts.clear()
+        const customModel = ed.models[customIdx]
+        for (const inst of customModel.creatorParts.values()) disposePartMesh(inst)
+        customModel.creatorParts.clear()
         for (const p of parts) {
-          const bone = m.skeleton.bones.find((b) => b.name === p.boneName)
-          const parentNode = bone?._linkedTransformNode
-          if (!parentNode) continue
-          const inst = createPartMesh(scene, p, parentNode as any)
-          m.creatorParts.set(p.id, inst)
+          if (!customModel.skeleton.bones.find((b) => b.name === p.boneName)) continue
+          const inst = createPartMesh(scene, p, customModel, ed.models[0])
+          customModel.creatorParts.set(p.id, inst)
         }
         bumpCreatorParts()
       },
