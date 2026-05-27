@@ -370,8 +370,18 @@ const WEAPON_CATALOGUE: Array<{
   stem: string
   kind: WeaponLibraryEntry['kind']
   targetMaxDim: number
+  // Optional: stretch only the handle (lower portion of mesh) by N
+  // metres along the long axis after normalise. The head stays at its
+  // native size; the handle gets longer. Linear falloff anchored at the
+  // top of the handle so the head/handle junction stays geometrically
+  // continuous.
+  handleExtensionM?: number
+  // Fraction of the total mesh height (from the bottom) that counts as
+  // "handle" for the extension. Default 0.6 = bottom 60% is handle.
+  handleFractionFromBottom?: number
 }> = [
-  { file: 'axe_textured.glb', stem: 'axe_textured', kind: 'axe', targetMaxDim: 0.6 },
+  // 0.4m extension → total ≈ 1.0m, roughly sword-length.
+  { file: 'axe_textured.glb', stem: 'axe_textured', kind: 'axe', targetMaxDim: 0.6, handleExtensionM: 0.4, handleFractionFromBottom: 0.6 },
 ]
 
 export async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntry[]> {
@@ -397,8 +407,14 @@ export async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntr
       // transform stack. Bakes the world matrix + scale factor into
       // vertex positions; detaches from parent so the mesh stands alone.
       normalizeWeaponMeshes(meshes, entry.targetMaxDim)
+      // Optional handle stretch — keeps head at native size, lengthens
+      // the handle. Runs AFTER normalise so the extension is in world
+      // metres, not GLB units.
+      if (entry.handleExtensionM && entry.handleExtensionM > 0) {
+        extendWeaponHandle(meshes, entry.handleExtensionM, entry.handleFractionFromBottom ?? 0.6)
+      }
       library.push({ stem: entry.stem, meshes, kind: entry.kind })
-      console.log(`[editor] weapon library: '${entry.stem}' (${entry.kind}) — ${meshes.length} mesh(es), normalized to ${entry.targetMaxDim}m`)
+      console.log(`[editor] weapon library: '${entry.stem}' (${entry.kind}) — ${meshes.length} mesh(es), normalized to ${entry.targetMaxDim}m${entry.handleExtensionM ? ` + ${entry.handleExtensionM}m handle stretch` : ''}`)
     } catch (err) {
       console.warn(`[editor] failed to load weapon '${entry.stem}':`, err)
     }
@@ -460,6 +476,53 @@ function normalizeWeaponMeshes(meshes: Mesh[], targetMaxDim: number): void {
     m.scaling.setAll(1)
     m.rotation.setAll(0)
     m.rotationQuaternion = null
+    m.refreshBoundingInfo()
+  }
+}
+
+// Stretch the handle of an upright weapon (head at +Y, handle below)
+// without resizing the head. Assumes the long axis is Y in mesh-local
+// space (true for this axe pack after normalise). Vertices with
+// Y > handleTopY stay put; vertices below are pushed downward via a
+// linear falloff so the handle top stays continuous with the head.
+//
+// `handleFractionFromBottom` (0..1) — fraction of total height that
+// counts as handle. 0.6 = bottom 60% is handle, top 40% is head.
+function extendWeaponHandle(
+  meshes: Mesh[],
+  extensionM: number,
+  handleFractionFromBottom: number,
+): void {
+  // 1. Union Y bbox.
+  let minY = Infinity, maxY = -Infinity
+  for (const m of meshes) {
+    const positions = m.getVerticesData(VertexBuffer.PositionKind)
+    if (!positions) continue
+    for (let i = 1; i < positions.length; i += 3) {
+      if (positions[i] < minY) minY = positions[i]
+      if (positions[i] > maxY) maxY = positions[i]
+    }
+  }
+  if (!Number.isFinite(minY) || !Number.isFinite(maxY)) return
+  const totalHeight = maxY - minY
+  if (totalHeight <= 0) return
+  const handleTopY = minY + totalHeight * handleFractionFromBottom
+  const handleLen = handleTopY - minY
+  if (handleLen <= 0) return
+  // 2. Stretch handle vertices: linear falloff so handleTop stays put,
+  // bottom-most vertex moves down by extensionM. Mesh boundary (head/
+  // handle ring) is unchanged so the silhouette stays watertight.
+  for (const m of meshes) {
+    const positions = m.getVerticesData(VertexBuffer.PositionKind)
+    if (!positions) continue
+    const newPositions = new Float32Array(positions)
+    for (let i = 1; i < positions.length; i += 3) {
+      const y = positions[i]
+      if (y >= handleTopY) continue
+      const fraction = (handleTopY - y) / handleLen
+      newPositions[i] = y - fraction * extensionM
+    }
+    m.setVerticesData(VertexBuffer.PositionKind, newPositions, true)
     m.refreshBoundingInfo()
   }
 }
