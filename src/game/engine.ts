@@ -658,13 +658,9 @@ export function createEngine(
       }
     }
 
-    // Material colour baseline for Style-panel Reset (same as before).
-    const editorMaterialBaseline = new Map<string, string>()
-    for (const m of scene.materials as any[]) {
-      if (typeof m.name === 'string' && m.name.startsWith('editor_')) {
-        editorMaterialBaseline.set(m.name, m.diffuseColor?.toHexString?.() ?? '#888888')
-      }
-    }
+    // Baseline material colours are now stored on each material's
+    // `metadata.baselineHex` (see editor-scene.ts loadKnightInstance) so
+    // Reset reads from there instead of a scene-wide map.
 
     ;(window as any).__editor = {
       snapshot: (name: string) => snapshotPose(active().skeleton, name),
@@ -805,30 +801,34 @@ export function createEngine(
       getSelectedBonePosition,
       hasPositionControl: (boneName: string) => POSITION_BONES.includes(boneName),
       setBonePickerActive: (a: boolean) => bonePicker?.setActive(a),
+      // Per-model material APIs — read/write the ACTIVE model's
+      // matCache only, so recolouring one knight doesn't bleed into
+      // the others.
       getEditorMaterials: () => {
-        return scene.materials
-          .filter((m: any) => typeof m.name === 'string' && m.name.startsWith('editor_'))
-          .map((m: any) => ({
-            name: m.name.replace(/^editor_/, ''),
-            hex: m.diffuseColor?.toHexString?.() ?? '#888888',
-          }))
+        const m = active()
+        if (!m?.matCache) return []
+        return Array.from(m.matCache.entries()).map(([slot, mat]) => ({
+          name: slot,
+          hex: mat.diffuseColor?.toHexString?.() ?? '#888888',
+        }))
       },
       setEditorMaterialColor: (matName: string, hex: string) => {
-        const full = `editor_${matName}`
-        const mat = scene.materials.find((m: any) => m.name === full) as any
+        const m = active()
+        const mat = m?.matCache?.get(matName)
         if (!mat) return
         const c = Color3.FromHexString(hex)
         mat.diffuseColor = c
         mat.ambientColor = c.scale(0.5)
       },
       resetEditorMaterials: () => {
-        for (const m of scene.materials as any[]) {
-          if (typeof m.name !== 'string' || !m.name.startsWith('editor_')) continue
-          const hex = editorMaterialBaseline.get(m.name)
+        const m = active()
+        if (!m?.matCache) return
+        for (const mat of m.matCache.values()) {
+          const hex = (mat.metadata as any)?.baselineHex
           if (!hex) continue
           const c = Color3.FromHexString(hex)
-          m.diffuseColor = c
-          m.ambientColor = c.scale(0.5)
+          mat.diffuseColor = c
+          mat.ambientColor = c.scale(0.5)
         }
       },
       // Diagnostic — read a bone's world position from the ACTIVE editor

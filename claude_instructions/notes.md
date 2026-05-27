@@ -13,15 +13,17 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 - ✅ Custom **pose/animation editor** at scene `(50, 0, 0)` — separate knight rig used purely as a posing puppet
 - ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips X/Y/Z TRANSLATE stepper with leg-plant IK (feet stay glued to their world positions while body shifts)**, editable typed input + scroll-wheel + ± buttons, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, **Initial Position virtual pose** (top of Poses list, system, can't delete), virtual Initial Position anchor, rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, **animations can pick an Initial Pose** that the model snaps to before keyframes play, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
 - ✅ **Three-model editor** — Model 1 + Model 2 + Custom along X axis at (50,0,0), (51.5,0,0), (53.0,0,0). Custom is skeleton-only (all GLB meshes hidden via `isVisible = false` flagged on load by `loadKnightInstance(..., hideAllMeshes=true)`) — user builds the body part-by-part via the Creator tab. Active-model selector in left dash routes all bone-control / anim-preview to the selected one. Each model row has ✎ edit (rename + visibility toggle).
-- ✅ **Character Creator tab** (right panel, third tab alongside Bones + Style) — only operational when active model is Custom (idx 2). **Clone-only** (May 26): body bones (skinned extraction via `getAbsoluteInverseBindMatrix()` + `attachToBone()`) and props (sword + shield + future). Multi-primitive props auto-grouped into one TransformNode so a 4-piece sword rotates as one. Procedural primitives (sphere/box/cylinder/capsule) dropped from the Add UI but legacy parts still render. Add-target dropdown is 3-level nested (Category › Subcategory › Item) — Bones (Torso/L Arm/R Arm/L Leg/R Leg) + Weapons (Sword/Shield/Other). Per-part accordion: header (kind + bone select) always visible, body (size/offset/rotation/color steppers) collapses. Persists to library.json (`groupMeshNames`, `sourceMeshName` ride through).
-- ✅ **Multi-model spawn ergonomics (May 26)** — `+` button on the Models section header spawns a fresh visible knight 1.5m to the right of the rightmost model. `👁`/`🚫` toggle on each model row hides/shows in-place (no edit modal). BODY POSITION (world) is now editable — typing X/Y/Z updates both `model.position` (spawn anchor) and `model.root.position`, so each model can spawn anywhere. Reset goes back to the edited spawn position.
-- ✅ **Sync Play** — assign one anim per model and fire both simultaneously (`▶ Play both`) for combat practice / timing verification. Section sits above Animations in left dash.
+- ✅ **Character Creator tab** (right panel, third tab alongside Bones + Style) — only operational when active model is Custom (idx 2). **Clone-only** (May 26): body bones (skinned extraction via `getAbsoluteInverseBindMatrix()` + `attachToBone()`) and props (sword + shield + future). Multi-primitive props auto-grouped into one TransformNode so a 4-piece sword rotates as one. Procedural primitives (sphere/box/cylinder/capsule) dropped from the Add UI but legacy parts still render. **Body / Armor split (May 27)** — `meshFilter` on `CreatorPart` clamps skinned extraction to specific source-mesh stems. `BODY_MESH_STEMS = [Body, Hair, Shirt, Pants, Shoes]` for the soft layer; `ARMOR_MESH_STEMS = [Helmet, Platebody, Platelegs]` for the metal layer. Add-target dropdown is 3-level nested: **Body › region › bone**, **Armor › region › bone**, **Weapons › Sword/Shield/Other**, **Weapons (library) › Axe**. Per-part accordion: header is chevron + bone dropdown + delete (the section header carries category context, no more redundant "shape" label in the card). Parts list is itself sectioned to mirror the dropdown taxonomy (Body / Armor / Weapons). Persists to library.json (`groupMeshNames`, `sourceMeshName`, `meshFilter` ride through). Button says "+ Add" (was "+ Add clone" — they're components, not clones).
+- ✅ **Weapon library (May 27)** — extra GLBs from `public/models/weapons/` loaded async at editor scene init via `loadWeaponLibrary()`. Each `WEAPON_CATALOGUE` entry has `targetMaxDim` (m) — geometry is auto-normalised via local-vertex × scale-factor multiply + `setVerticesData(..., updatable=true)`. Surfaced in Creator dropdown as `Weapons (library)` category. `attachWeaponToHand(scene, lib, stem, glbMeshes, skeleton, bone, rotDeg)` makes a weapon the primary equipment on any knight — hides existing bone-parented meshes, clones the source material (so PBR textures + albedoTextures + normal maps carry through), parents to the bone's linkedTransformNode with parent-scale-normalised user transform. Used to equip the textured axe as Model 1's + hero's primary weapon at rotation `(90, 90, 45)` deg.
+- ✅ **Multi-model spawn ergonomics (May 26)** — `+` button on the Models section header spawns a fresh visible knight 1.5m to the right of the rightmost model. `👁`/`🚫` toggle on each model row hides/shows in-place (no edit modal). `🎯` button focuses the editor camera on that model — highlights orange when that's the currently-focused model. BODY POSITION (world) is now editable — typing X/Y/Z updates both `model.position` (spawn anchor) and `model.root.position`, so each model can spawn anywhere. Reset goes back to the edited spawn position.
+- ✅ **Sync Play (May 27)** — per-model anim selection via `syncAnims: string[]` (indexed by model idx). Each model row in the SyncPlay UI binds to its own slot, so Custom no longer shares state with Model 2. `▶ Play all` fires every model that has an anim selected.
+- ✅ **Per-model Style tab (May 27)** — each model owns its own `matCache: Map<slot, StandardMaterial>` (per-instance, not shared). `getEditorMaterials` / `setEditorMaterialColor` / `resetEditorMaterials` route through `active().matCache` — recolouring one knight no longer affects others. Baseline colour for Reset is stashed on `material.metadata.baselineHex` per material instance. Style tab re-fetches swatches when the active model changes.
 - ✅ **Two reset buttons** in right panel — Reset current model / Reset all models.
 - ✅ **Inverse Kinematics on 5 bones** — 2-bone analytical IK shared across paths. **Hips** → both legs adapt so feet stay planted (crouch / lean / weight shift). **Hand.L / Hand.R** → arm IK reaches new hand world position (sword placement, reaches). **Foot.L / Foot.R** → leg IK reaches new foot world position (kick prep, lifting steps). All five share the same solver; pole hints differ. See "IK system" section below for the Babylon gotchas — lots of them.
 - ✅ **Locomotion = per-keyframe displacement** (NOT per-anim metadata, NOT Hips-X/Z promotion — both tried and rejected). Each keyframe in the animation builder has `pos X[ ] Y[ ] Z[ ]` cm inputs = where the body is at this keyframe relative to anim-start position. At playback, character's `root.position` is animated to those positions, transformed through root's rotation (so +Z = "character's forward"). Composes across anims: anim 2 starts from wherever anim 1 ended.
 - ✅ **Editor preview moves the editor knight** through the world (not just bones-in-place) so author sees the actual character motion. Reset snaps editor knight back to its starting world position.
 - ✅ **Always-visible BODY POSITION readout** in right panel (top, both Bones/Style modes) — live world-space cm coords relative to starting position. Updates every frame.
-- ✅ **Style tab** (right panel toggle) — material recolor with native color pickers per material slot (Blade, Wood, Emblem, Metal, etc.). Editor knight only. Reset to default colors button. Bone spheres hidden in Style mode.
+- ✅ **Style tab** (right panel toggle) — per-model material recolor with native color pickers per material slot (Blade, Wood, Emblem, Metal, etc.). Edits the ACTIVE model's matCache only — recolouring is independent across Model 1 / Model 2 / Custom / future spawns. Reset to default colors button (reads baseline from per-material metadata). Bone spheres hidden in Style mode.
 - ✅ **Undo + Redo** with keyboard shortcuts (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z). UI: undo+redo in one row, full-width red Reset button below.
 - ✅ Persistence: `public/custom-animations/library.json` via dev-only Vite middleware (`vite-plugins/animation-saver.ts`). Anchors carry `rotations` + (Hips-only) `positions`; animation keyframes carry `displacement` — all round-trip through the JSON automatically.
 - ✅ Key dispatch: engine.ts checks `window.__customAnims` first → falls back to default Q/U/Space/Enter. Ctrl+Z/Y guarded before custom-anim lookup so a user-bound 'z'/'y' doesn't swallow them. Camera-mode `<select>` blurs after change so type-ahead ('e'→Editor) doesn't swallow keys.
@@ -514,11 +516,94 @@ The Vite dev plugin (`vite-plugins/animation-saver.ts`) writes the payload verba
 - Weapon subcategories are keyword-matched on stem (`/sword/i`, `/shield/i`, else "Other"). Add `axe`, `bow`, etc by extending the `weaponSubcats` array.
 - Dropdown shows only **ACTIVE_BONES** (19 combat-relevant bones), not the full 35-bone rig — fingers/toes/IK helpers aren't useful clone targets.
 
-### PartRow accordion (May 26)
+### PartRow accordion (May 26 → simplified May 27)
 
 - Each part has a chevron `▶`/`▼` header that toggles a body panel. Default collapsed so many parts (a built-up Custom model) stays scannable.
-- Two visible-always rows: (1) chevron + title (prop name or shape) + delete `×`, and (2) `bone` label + bone-retarget dropdown. Body has size/offset/rotation/color when expanded.
-- Title truncates with ellipsis when long. Click chevron OR title to toggle. Local React state (not persisted) — opens collapsed on tab entry.
+- **May 27**: header simplified to ONE row — chevron + bone dropdown + delete `×`. The category (Body / Armor / Weapon) is shown by the section header above the card, so the card itself only carries the bone identity. Drop the previous prop-name/shape label row.
+- Click chevron to toggle. Body (expanded) has size %, offset cm, rotation° (X/Y/Z labelled), color picker. Local React state (not persisted) — opens collapsed on tab entry.
+
+### Body / Armor split (May 27)
+
+- `CreatorPart.meshFilter?: string[]` clamps skinned bone extraction to a specific subset of source meshes. `extractBoneGeometry` skips any source mesh whose name-stem isn't in the filter (`m.name.split('_primitive')[0]` to strip Babylon's multi-material suffix).
+- Exported from `editor-scene.ts`:
+  - `BODY_MESH_STEMS = ['Body', 'Hair', 'Shirt', 'Pants', 'Shoes']` — skin + cloth-under-armor.
+  - `ARMOR_MESH_STEMS = ['Helmet', 'Platebody', 'Platelegs']` — metal pieces.
+- Add-target dropdown gains an `▸ Armor` category alongside `▸ Body` with the same bone-region subcategories. Encoded as `body:<bone>` / `armor:<bone>` in the value. `onAdd` decodes and calls `addCreatorPart('clone', bone, meshFilter)`.
+- Result: cloning "Body › Torso › Chest" pulls Body+Shirt+Pants+Shoes+Hair triangles weighted to the Chest bone (skin-coloured). Cloning "Armor › Torso › Chest" pulls Helmet+Platebody+Platelegs triangles weighted to Chest (metal-coloured). The two layers can be added independently and recoloured separately later via the style panel.
+- The first contributing source's material is used as the colour seed (`firstSourceMaterial` returned by `extractBoneGeometry`), so the filter naturally pushes the seed toward skin material vs metal material depending on category.
+
+### Sectioned cards (May 27)
+
+The Creator parts list itself is now sectioned to mirror the Add dropdown's taxonomy:
+
+```
+▸ Body
+   ▸ Torso        [Hips / Spine / Chest cards]
+   ▸ Left Arm     [...]
+▸ Armor
+   ▸ Torso        [Helmet, Platebody pieces]
+   …
+▸ Weapons         [axe / sword / shield cards]
+```
+
+`CategorizedParts` in `BoneControls.tsx` partitions by `categorizePart(p)`:
+- `weapon` if `sourceMeshName` or `groupMeshNames` set.
+- `armor` if `meshFilter` contains any `ARMOR_MESH_STEMS` member.
+- `body` otherwise (default + meshFilter matching BODY).
+- `other` for legacy primitives (sphere/box from before clone-only).
+
+Within Body and Armor, parts are sub-grouped by `categorize([p.boneName])[0].name` (Torso / Left Arm / Right Arm / Left Leg / Right Leg / IK Helpers / Other) so adjacent body parts cluster visually.
+
+## Per-model Style tab (May 27)
+
+Each model owns its own materials. `ModelInstance.matCache: Map<slot, StandardMaterial>` populated in `loadKnightInstance` — each call builds a fresh cache (previously the cache was shared across all editor instances via a `matCache` param). Material name uses `editor_<modelName>_<slot>` for scene-graph uniqueness.
+
+Baseline colour for Reset is stashed on `material.metadata.baselineHex` at creation. `resetEditorMaterials` iterates `active().matCache.values()` and restores from each material's own baseline — no scene-wide baseline map needed.
+
+Engine APIs `getEditorMaterials` / `setEditorMaterialColor` / `resetEditorMaterials` all read+write `active().matCache` only. Style tab's `useEffect` re-fetches on `activeModelIdx` change so switching the active model in the left dash live-updates the swatch list.
+
+## Weapon library (May 27)
+
+External weapon GLBs live in `public/models/weapons/`. Loaded async at editor-scene init via `loadWeaponLibrary(scene)` (exported from `editor-scene.ts`); engine.ts also calls it upfront to make weapons available to `createHero(scene, weaponLibrary)`.
+
+### Catalogue + auto-normalise
+
+`WEAPON_CATALOGUE` in `editor-scene.ts` is an array of `{ file, stem, kind, targetMaxDim }`. Adding a new weapon = one entry + dropping its GLB. Current:
+
+```ts
+{ file: 'axe_textured.glb', stem: 'axe_textured', kind: 'axe', targetMaxDim: 0.6 }
+```
+
+At load:
+1. `SceneLoader.ImportMeshAsync` loads the GLB.
+2. Mesh visibility is left to default; meshes are added to the library entry's `meshes[]`.
+3. `normalizeWeaponMeshes(meshes, targetMaxDim)` walks LOCAL vertex coords (NOT world — parent transforms after load can be lazy/contain Blender→glTF conversion factors), computes the union bbox, calculates `factor = targetMaxDim / maxLocalDim`, and bakes the factor into each mesh's positions via `setVerticesData(VertexBuffer.PositionKind, scaledPositions, /* updatable */ true)`. **Critical gotcha**: `updateVerticesData` silently no-ops on non-updatable GLB-loaded buffers — use `setVerticesData(...,  true)` which replaces the buffer with an updatable one. After bake, mesh's local transform resets to identity + `parent = null`, so the mesh is self-contained at the normalised scale and clones inherit correctly.
+
+### `attachWeaponToHand` — install a weapon as primary equipment
+
+Used for hero + Model 1 (Custom uses the Creator). Steps:
+1. Look up the library entry by stem.
+2. Walk `glbMeshes` of the target knight; for each non-skinned mesh whose parent chain leads to the target bone's linkedTransformNode, `setEnabled(false)`. This hides the stock GLB sword/shield on that hand.
+3. Create a 0-vert `weapon_<stem>_root` Mesh parented to the bone's linkedTransformNode.
+4. For each source weapon mesh: `VertexData.ExtractFromMesh(src, /* copy */ true)`, build a child Mesh, parent under root.
+5. If source has a material with `clone()`, **clone it onto the child** — preserves PBR textures (albedoTexture + metallic + roughness + normal maps). Otherwise fall back to a plain StandardMaterial.
+6. Apply user transform on the root, normalised by `parentNode.absoluteScaling` (knight bones carry ~100× baked armature scale → divide it out so a 1.0× multiplier = native size).
+
+Hero gets the axe via `createHero(scene, weaponLibrary)` (engine.ts loads the library first then passes it). Editor scene equips Model 1 directly during `createEditorScene`.
+
+### Material seeding for Creator clones
+
+Updated for textures + per-source colour. For Creator's `createPropGroupClonePart`:
+- Each child material is `src.material.clone(name)` (preserves PBR texture refs + per-piece colours).
+- Falls back to StandardMaterial seeded from `sampleMaterialHex(src.material)` (reads `diffuseColor` for StandardMaterial OR `albedoColor` for PBRMaterial).
+- `CreatorPartInstance.material` typed as `Material` (base class) so PBR clones work alongside StandardMaterial primitives.
+- `applyColor(mat, hex)` is now any-typed; sets `diffuseColor` if present, falls back to `albedoColor` for PBR.
+
+### Library weapon vs in-skeleton prop distinction
+
+In `createPropGroupClonePart` and `createPropClonePart`:
+- **In-skeleton props** (sword/shield parented under Model 1's `Hand Hold.R`): `src.parent !== null` → copy source's local position/rotation/scaling so the prop sits in its authored hand-relative pose.
+- **Library weapons** (loaded standalone, `parent = null` after `normalizeWeaponMeshes` detaches): identity local → user offset/rot/bone choice fully determines pose. Without this, the debug-preview position (which moves the source mesh to a visible spot in the scene) leaked into clones, landing them 54m away from the bone.
 
 ## Asset pipeline (FBX → GLB)
 
@@ -608,6 +693,28 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - WASD free-roam locomotion in FP mode — input-driven `root.position` translation + walk-cycle anim on top (decoupled from the per-keyframe-displacement system, which is for discrete moves)
 - Mouse-look for hero in Locked camera (currently click-drag)
 - Production-safe persistence (current `/api/animations` is dev-only Vite middleware)
+
+## Lessons captured (Weapon library + Body/Armor split session, 2026-05-27)
+
+E1. **Babylon `updateVerticesData` silently no-ops on non-updatable buffers.** GLB-loaded geometry defaults to non-updatable. Use `mesh.setVerticesData(VertexBuffer.PositionKind, newPositions, /* updatable */ true)` which REPLACES the buffer with an updatable one. Cost a session of head-scratching: the bake math was right, factor was right, but vertices never updated → 30× shrink looked like wrong-direction maths. Verified via Playwright by measuring world bounds before vs after.
+
+E2. **Compute weapon bbox from LOCAL vertex coords, not world.** World-matrix bounding boxes after GLB load can be lazy or contaminated by parent transforms (Blender→glTF -90° X-rotation, unit-conversion scales, etc). Local vertex walk + uniform scale + `setVerticesData(..., true)` is the reliable normalise path. Vertices baked at normalised scale, mesh's local transform reset to identity + `parent = null` = self-contained source ready for cloning.
+
+E3. **Source material `.clone(name)` preserves PBR textures.** Per-clone independence requires NEW material instances (so disposal + recolour don't affect the source), but new StandardMaterial loses albedoTexture + normalMap + roughness. `material.clone()` works on both StandardMaterial and PBRMaterial and copies all texture refs. `CreatorPartInstance.material` widened to `Material` base type. `applyColor` made any-typed: writes `diffuseColor` for StandardMaterial or `albedoColor` for PBR.
+
+E4. **Library-weapon vs in-skeleton-prop is detectable via `parent === null`.** After `normalizeWeaponMeshes`, library source meshes have parent=null (detached). In-skeleton props (sword/shield parented to Hand Hold bones on Model 1) keep their bone parent. Use this to decide whether to copy `src.position/rotation/scaling` on clone (in-skeleton: yes, to preserve hand-relative pose) or default to identity (library: yes, user controls fully). Without this distinction, the debug-preview position bleeds into clones.
+
+E5. **`attachToBone` doesn't propagate `setEnabled` from model root.** The mesh is parented to a Bone object (not a TransformNode in the model's hierarchy), so toggling root visibility leaves bone-attached creator parts visible. Fix: in `setModelVisible`, iterate `model.creatorParts.values()` and `setEnabled` each part's mesh + groupChildren directly. Bone-picker spheres also live scene-level, not parented to root — same explicit toggle needed.
+
+E6. **List-render maps over models but state was 2-fixed-slots.** SyncPlay had `syncAnim1`/`syncAnim2` for 3+ models, so any model with `idx ≥ 1` shared the second slot — Custom row mirrored Model 2's dropdown. Replace with `syncAnims: string[]` indexed by model so it scales to any number of models, including dynamically added ones.
+
+E7. **Empty option text + native `<select>` styling don't match OS theme.** `<optgroup>` labels render with OS theme — invisible on dark dropdowns. Workaround: use disabled `<option>` rows as section headers, build 3-level hierarchy from regular options with unicode-space indentation. Same applies to the parts list — mirror that taxonomy with custom div headers (since we control the styling there).
+
+E8. **Per-instance vs shared caches matter for downstream features.** The `matCache` was originally shared across all editor knights to save GPU. Sharing means recolouring is global — fine for an aesthetic preview, useless for "each model has its own style". Lift the cache to per-`ModelInstance` and route engine APIs through `active().matCache`. Per-material baseline (for Reset) goes on `material.metadata.baselineHex` so the baseline lookup follows the material wherever it goes, no scene-wide map.
+
+E9. **Asset-shop "multi-tone" previews lie sometimes.** Quaternius's copper-axe FBX ships single-material, single-colour (white vertex colours, single PBR `albedoColor`). The shop preview's "different layers" is marketing render lighting. To get real multi-tone, find an FBX that actually ships a hand-painted UV-mapped texture atlas alongside (e.g., the medieval-axe pack with `axe tex.jpg` + normal/specular maps). Probe via Playwright: read material class + texture presence + vertex-colour range before assuming a problem with conversion.
+
+E10. **Mesh-layer filtering is the right abstraction for body-vs-armor cloning.** Don't try to extract "armor" by inspecting material names or vertex weights cleverly — the GLB ships armor as separate sub-meshes (`Helmet`, `Platebody`, `Platelegs`). Just allowlist source-mesh stems per category. Single field on the schema, one line in the extraction loop. Clean and extensible (Cloth as a third layer is trivial).
 
 ## Lessons captured (Creator polish + props + grouping session, 2026-05-26 evening)
 

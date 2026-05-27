@@ -142,6 +142,11 @@ export type ModelInstance = {
   skeleton: Skeleton           // primary skeleton for bone lookups
   skeletons: Skeleton[]        // all 8 (need prepare() each frame)
   glbMeshes: AbstractMesh[]
+  // Per-instance material cache keyed by GLB material-slot name
+  // (Skin / Metal / Blade / etc). Used by the Style tab — each model
+  // has independent colours so recolouring Model 2 doesn't affect
+  // Model 1 or Custom.
+  matCache: Map<string, StandardMaterial>
   restPose: Record<string, [number, number, number, number]>
   restPositions: Record<string, [number, number, number]>
   restWorldPositions: Record<string, [number, number, number]>
@@ -178,7 +183,6 @@ export type EditorSceneApi = {
 
 async function loadKnightInstance(
   scene: Scene,
-  matCache: Map<string, StandardMaterial>,
   name: string,
   position: Vector3,
   yRotation: number,
@@ -192,7 +196,11 @@ async function loadKnightInstance(
   root.scaling = root.scaling.scale(1.2)
   root.rotation = new Vector3(0, yRotation, 0)
 
-  // Materials — shared across all instances via matCache
+  // Per-instance material cache — each model owns its own StandardMaterial
+  // for each GLB slot (Skin / Metal / Blade / …). The Style tab edits these
+  // so recolouring is independent per model. Baseline colour is stashed on
+  // material.metadata for the Reset path.
+  const matCache = new Map<string, StandardMaterial>()
   for (const m of result.meshes) {
     m.isPickable = false
     if (!(m instanceof Mesh) || m.getTotalVertices() === 0) continue
@@ -200,11 +208,13 @@ async function loadKnightInstance(
     const matName = m.material.name
     let mat = matCache.get(matName)
     if (!mat) {
-      mat = new StandardMaterial(`editor_${matName}`, scene)
-      mat.diffuseColor = MAT_COLORS[matName] ?? FALLBACK
+      const baseline = MAT_COLORS[matName] ?? FALLBACK
+      mat = new StandardMaterial(`editor_${name}_${matName}`, scene)
+      mat.diffuseColor = baseline.clone()
       mat.specularColor = new Color3(0.10, 0.10, 0.12)
-      mat.ambientColor = (MAT_COLORS[matName] ?? FALLBACK).scale(0.5)
+      mat.ambientColor = baseline.scale(0.5)
       mat.backFaceCulling = false
+      mat.metadata = { baselineHex: baseline.toHexString() }
       matCache.set(matName, mat)
     }
     m.material = mat
@@ -278,6 +288,7 @@ async function loadKnightInstance(
     skeleton,
     skeletons,
     glbMeshes: result.meshes,
+    matCache,
     restPose,
     restPositions,
     restWorldPositions,
@@ -290,16 +301,14 @@ async function loadKnightInstance(
 
 export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | null> {
   try {
-    // Shared material cache — both knights use the same StandardMaterial
-    // instances so Style-panel recolors affect both at once and we don't
-    // waste GPU on duplicates.
-    const matCache = new Map<string, StandardMaterial>()
-
-    const m1 = await loadKnightInstance(scene, matCache, 'Model 1', MODEL1_POSITION, MODEL1_YROT)
-    const m2 = await loadKnightInstance(scene, matCache, 'Model 2', MODEL2_POSITION, MODEL2_YROT)
+    // Each model gets its OWN material cache (per-instance), so the Style
+    // tab edits one knight at a time. Recolouring Model 2 doesn't affect
+    // Model 1, Custom, or any other model spawned later.
+    const m1 = await loadKnightInstance(scene, 'Model 1', MODEL1_POSITION, MODEL1_YROT)
+    const m2 = await loadKnightInstance(scene, 'Model 2', MODEL2_POSITION, MODEL2_YROT)
     // Custom (Model 3): skeleton-only — meshes hidden so user builds from
     // primitives via the Creator tab.
-    const m3 = await loadKnightInstance(scene, matCache, 'Custom', MODEL3_POSITION, MODEL3_YROT, true)
+    const m3 = await loadKnightInstance(scene, 'Custom', MODEL3_POSITION, MODEL3_YROT, true)
 
     // The first load also brings in animationGroups (baked anims). Both
     // instances share these (they're scene-global) but they only target the
@@ -327,13 +336,14 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
     )
 
 
+
     const api: EditorSceneApi = {
       models: [m1, m2, m3],
       allBoneNames,
       animationGroups,
       weaponLibrary,
       addModel: async (name, position, yRotation, hideAllMeshes = false) => {
-        const m = await loadKnightInstance(scene, matCache, name, position, yRotation, hideAllMeshes)
+        const m = await loadKnightInstance(scene, name, position, yRotation, hideAllMeshes)
         api.models.push(m)
         return api.models.length - 1
       },

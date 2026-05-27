@@ -129,7 +129,9 @@ export default function BoneControls() {
     } else {
       ed.setBonePickerActive?.(true)
     }
-  }, [panelMode])
+    // activeModelIdx dep: Style materials are now per-model, so switching
+    // active model while in Style mode must re-fetch the new model's list.
+  }, [panelMode, activeModelIdx])
 
   const onMaterialColor = (matName: string, hex: string) => {
     ;(window as any).__editor?.setEditorMaterialColor?.(matName, hex)
