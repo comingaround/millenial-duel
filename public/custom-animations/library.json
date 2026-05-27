@@ -1212,8 +1212,8 @@
   ],
   "creatorParts": [
     {
-      "id": "part_1779803621663_15b6",
-      "boneName": "Upper Leg.R",
+      "id": "part_1779873288008_c8xc",
+      "boneName": "Head",
       "shape": "clone",
       "scale": [
         1,
@@ -1230,11 +1230,18 @@
         0,
         0
       ],
-      "color": "#f0c7a8"
+      "color": "#f0c7a8",
+      "meshFilter": [
+        "Body",
+        "Hair",
+        "Shirt",
+        "Pants",
+        "Shoes"
+      ]
     },
     {
-      "id": "part_1779803647880_2yyw",
-      "boneName": "Upper Leg.L",
+      "id": "part_1779873302990_kpcv",
+      "boneName": "Head",
       "shape": "clone",
       "scale": [
         1,
@@ -1251,73 +1258,11 @@
         0,
         0
       ],
-      "color": "#f0c7a8"
-    },
-    {
-      "id": "part_1779803720833_axv3",
-      "boneName": "Spine",
-      "shape": "clone",
-      "scale": [
-        1,
-        1,
-        1
-      ],
-      "offset": [
-        0,
-        0,
-        0
-      ],
-      "rotation": [
-        0,
-        0,
-        0
-      ],
-      "color": "#f0c7a8"
-    },
-    {
-      "id": "part_1779803732230_3ybo",
-      "boneName": "Hips",
-      "shape": "clone",
-      "scale": [
-        1,
-        1,
-        1
-      ],
-      "offset": [
-        0,
-        0,
-        0
-      ],
-      "rotation": [
-        0,
-        0,
-        0
-      ],
-      "color": "#f0c7a8"
-    },
-    {
-      "id": "part_1779810348989_1tp8",
-      "boneName": "Hand Hold.R",
-      "shape": "clone",
-      "scale": [
-        1,
-        1,
-        1
-      ],
-      "offset": [
-        0,
-        0,
-        0
-      ],
-      "rotation": [
-        90,
-        90,
-        45
-      ],
-      "color": "#ffffff",
-      "sourceMeshName": "axe_textured",
-      "groupMeshNames": [
-        "Axe"
+      "color": "#525766",
+      "meshFilter": [
+        "Helmet",
+        "Platebody",
+        "Platelegs"
       ]
     }
   ]

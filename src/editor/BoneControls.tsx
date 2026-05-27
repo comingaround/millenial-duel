@@ -26,6 +26,7 @@ type CreatorPart = {
   color: string
   sourceMeshName?: string
   groupMeshNames?: string[]
+  meshFilter?: string[]
 }
 
 export default function BoneControls() {
@@ -47,7 +48,7 @@ export default function BoneControls() {
   // addTarget is a string formatted as either "bone:Head" or "prop:Sword".
   // Single dropdown with both kinds; the prefix tells the engine which
   // path to dispatch on Add.
-  const [addTarget, setAddTarget] = useState<string>('bone:Head')
+  const [addTarget, setAddTarget] = useState<string>('body:Head')
   const [creatorTargets, setCreatorTargets] = useState<{
     bones: string[]
     props: Array<{ stem: string; members: string[] }>
@@ -586,6 +587,11 @@ function categorize(allBones: string[]): Array<{ name: string; bones: string[] }
 // in library.json still render via creator-parts.ts.
 // ──────────────────────────────────────────────────────────────────
 const CUSTOM_MODEL_IDX = 2
+// Mesh-stem layer filters — mirror of BODY_MESH_STEMS / ARMOR_MESH_STEMS
+// in editor-scene.ts. Used by the Creator's bone-clone path to split
+// "Body" (skin + cloth) from "Armor" (metal pieces).
+const BODY_MESH_STEMS = ['Body', 'Hair', 'Shirt', 'Pants', 'Shoes']
+const ARMOR_MESH_STEMS = ['Helmet', 'Platebody', 'Platelegs']
 
 function CreatorTab({
   activeModelIdx,
@@ -647,6 +653,10 @@ function CreatorTab({
       } else {
         ed?.addCreatorPropClone?.(prop.members[0])
       }
+    } else if (addTarget.startsWith('body:')) {
+      ed?.addCreatorPart?.('clone', addTarget.slice(5), BODY_MESH_STEMS)
+    } else if (addTarget.startsWith('armor:')) {
+      ed?.addCreatorPart?.('clone', addTarget.slice(6), ARMOR_MESH_STEMS)
     } else {
       const bone = addTarget.startsWith('bone:') ? addTarget.slice(5) : addTarget
       ed?.addCreatorPart?.('clone', bone)
@@ -697,17 +707,37 @@ function CreatorTab({
                       Item            (selectable, 2 indents) */}
           {boneGroups.length > 0 ? (
             <option disabled value="" style={creatorCategoryStyle}>
-              {'▸ Bones'}
+              {'▸ Body'}
             </option>
           ) : null}
           {boneGroups.map((g) => (
-            <React.Fragment key={`bg-${g.name}`}>
+            <React.Fragment key={`body-${g.name}`}>
               <option disabled value="" style={creatorSubcategoryStyle}>
                 {`   ▸ ${g.name}`}
               </option>
               {g.bones.map((b) => (
-                <option key={`b-${b}`} value={`bone:${b}`} style={creatorItemStyle}>
+                <option key={`body-${b}`} value={`body:${b}`} style={creatorItemStyle}>
                   {`        ${b}`}
+                </option>
+              ))}
+            </React.Fragment>
+          ))}
+          {/* Armor — same bone subcategories, extraction filtered to
+              metal pieces (Helmet/Platebody/Platelegs). Independent of
+              Body so you can colour armour separately. */}
+          {boneGroups.length > 0 ? (
+            <option disabled value="" style={creatorCategoryStyle}>
+              {'▸ Armor'}
+            </option>
+          ) : null}
+          {boneGroups.map((g) => (
+            <React.Fragment key={`armor-${g.name}`}>
+              <option disabled value="" style={creatorSubcategoryStyle}>
+                {`   ▸ ${g.name}`}
+              </option>
+              {g.bones.map((b) => (
+                <option key={`armor-${b}`} value={`armor:${b}`} style={creatorItemStyle}>
+                  {`        ${b}`}
                 </option>
               ))}
             </React.Fragment>
@@ -748,7 +778,7 @@ function CreatorTab({
             </React.Fragment>
           ))}
         </select>
-        <button style={creatorAddBtnStyle} onClick={onAdd}>+ Add clone</button>
+        <button style={creatorAddBtnStyle} onClick={onAdd}>+ Add</button>
       </div>
 
       <div style={{ fontSize: 10, opacity: 0.55, marginBottom: 6 }}>
@@ -757,13 +787,82 @@ function CreatorTab({
 
       {parts.length === 0 ? (
         <div style={{ fontSize: 11, opacity: 0.45 }}>
-          (Pick a body bone or prop → Add clone)
+          (Pick a body bone, armor or weapon → Add)
         </div>
       ) : (
-        parts.map((p) => (
-          <PartRow key={p.id} part={p} bones={boneOptions} onChange={onChange} />
-        ))
+        <CategorizedParts parts={parts} bones={boneOptions} onChange={onChange} />
       )}
+    </div>
+  )
+}
+
+// Group parts by category (Body / Armor / Weapon) so the list mirrors
+// the Add dropdown's structure. Within Body/Armor, further split by
+// bone region (Torso / Arms / Legs) via the existing categorize() helper.
+function categorizePart(p: CreatorPart): 'body' | 'armor' | 'weapon' | 'other' {
+  if (p.sourceMeshName || p.groupMeshNames) return 'weapon'
+  if (p.shape !== 'clone') return 'other'  // legacy primitives
+  if (!p.meshFilter || p.meshFilter.length === 0) return 'body'
+  if (p.meshFilter.some((s) => ARMOR_MESH_STEMS.includes(s))) return 'armor'
+  return 'body'
+}
+
+function CategorizedParts({
+  parts, bones, onChange,
+}: { parts: CreatorPart[]; bones: string[]; onChange: () => void }) {
+  // Partition into buckets in stable order.
+  const buckets = { body: [] as CreatorPart[], armor: [] as CreatorPart[], weapon: [] as CreatorPart[], other: [] as CreatorPart[] }
+  for (const p of parts) buckets[categorizePart(p)].push(p)
+  // Sub-group body/armor by bone region using the bone categorizer.
+  const bySection = (list: CreatorPart[]) => {
+    const groups: Record<string, CreatorPart[]> = {}
+    for (const p of list) {
+      const region = categorize([p.boneName])[0]?.name ?? 'Other'
+      ;(groups[region] ||= []).push(p)
+    }
+    // Preserve a stable order matching how the bone groups are usually listed.
+    const order = ['Torso', 'Left Arm', 'Right Arm', 'Left Leg', 'Right Leg', 'IK Helpers', 'Other']
+    return order.filter((r) => groups[r]?.length).map((r) => ({ name: r, parts: groups[r] }))
+  }
+  const render = (p: CreatorPart) => (
+    <PartRow key={p.id} part={p} bones={bones} onChange={onChange} />
+  )
+  return (
+    <div>
+      {buckets.body.length > 0 ? (
+        <>
+          <div style={partSectionHeaderStyle}>▸ Body</div>
+          {bySection(buckets.body).map((g) => (
+            <div key={`body-${g.name}`}>
+              <div style={partSubsectionHeaderStyle}>{`   ▸ ${g.name}`}</div>
+              {g.parts.map(render)}
+            </div>
+          ))}
+        </>
+      ) : null}
+      {buckets.armor.length > 0 ? (
+        <>
+          <div style={partSectionHeaderStyle}>▸ Armor</div>
+          {bySection(buckets.armor).map((g) => (
+            <div key={`armor-${g.name}`}>
+              <div style={partSubsectionHeaderStyle}>{`   ▸ ${g.name}`}</div>
+              {g.parts.map(render)}
+            </div>
+          ))}
+        </>
+      ) : null}
+      {buckets.weapon.length > 0 ? (
+        <>
+          <div style={partSectionHeaderStyle}>▸ Weapons</div>
+          {buckets.weapon.map(render)}
+        </>
+      ) : null}
+      {buckets.other.length > 0 ? (
+        <>
+          <div style={partSectionHeaderStyle}>▸ Other (legacy)</div>
+          {buckets.other.map(render)}
+        </>
+      ) : null}
     </div>
   )
 }
@@ -790,14 +889,11 @@ function PartRow({ part, bones, onChange }: { part: CreatorPart; bones: string[]
   // ACTIVE_BONES (e.g. legacy data), so the dropdown stays selectable.
   const dropdownBones = bones.includes(part.boneName) ? bones : [part.boneName, ...bones]
 
-  // Label: prop name (single OR group stem) or fallback to shape.
-  const kindLabel = part.sourceMeshName
-    ? `${part.sourceMeshName}${part.groupMeshNames ? ` (${part.groupMeshNames.length})` : ''}`
-    : part.shape
   return (
     <div style={partRowStyle}>
-      {/* Header row 1: chevron + title + delete. Click chevron OR title
-          to toggle accordion. Stacked layout: title gets its own row. */}
+      {/* Card header — chevron + bone dropdown + delete. The category
+          (Body / Armor / Weapons) is shown by the section header above
+          the card, so the card itself only carries the bone identity. */}
       <div style={partHeaderRow1Style}>
         <span
           style={partChevronStyle}
@@ -806,22 +902,11 @@ function PartRow({ part, bones, onChange }: { part: CreatorPart; bones: string[]
         >
           {expanded ? '▼' : '▶'}
         </span>
-        <span
-          style={partTitleStyle}
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {kindLabel}
-        </span>
-        <span style={partDelStyle} onClick={del} title="Delete">×</span>
-      </div>
-      {/* Header row 2: bone retarget — always visible so user can move
-          a collapsed part between bones without expanding. */}
-      <div style={partHeaderRow2Style}>
-        <span style={partBoneLabelStyle}>bone</span>
         <select
           value={part.boneName}
           onChange={(e) => update({ boneName: e.target.value })}
           style={{ ...creatorSelectStyle, flex: '1 1 100%' }}
+          title="Attach to bone"
         >
           {dropdownBones.map((b) => (
             <option key={b} value={b} style={{ background: '#1c1f24', color: '#fff' }}>
@@ -829,6 +914,7 @@ function PartRow({ part, bones, onChange }: { part: CreatorPart; bones: string[]
             </option>
           ))}
         </select>
+        <span style={partDelStyle} onClick={del} title="Delete">×</span>
       </div>
       {/* Accordion body — size / offset / rotation / color. */}
       {expanded ? (
@@ -1385,6 +1471,27 @@ const creatorItemStyle: CSSProperties = {
   background: '#1c1f24',
   color: '#fff',
   fontSize: 11,
+}
+// Section headers inside the parts list — mirror the Add-dropdown's
+// 3-level visual hierarchy (category / subcategory / item) so the
+// authored components feel like the same taxonomy the user picks from.
+const partSectionHeaderStyle: CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  color: '#cbd5e1',
+  letterSpacing: 0.6,
+  marginTop: 8,
+  marginBottom: 3,
+  padding: '2px 4px',
+  background: '#0a0c0f',
+  borderRadius: 3,
+}
+const partSubsectionHeaderStyle: CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: '#94a3b8',
+  margin: '3px 0 2px 0',
+  padding: '1px 4px',
 }
 const partRowStyle: CSSProperties = {
   background: 'rgba(255, 255, 255, 0.04)',

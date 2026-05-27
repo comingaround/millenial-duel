@@ -36,6 +36,12 @@ const MODEL3_YROT = -Math.PI / 2     // faces +X (same as Model 1)
 //   Arms       — Upper Arm / Lower Arm / Hand
 //   Legs       — Upper Leg / Lower Leg / Foot
 // Skipped: Fingers, Thumbs, Hand Hold (weapon attach), Toes, IK helpers.
+// Knight mesh layers (probed from knight.glb). Used by the Creator's
+// bone-clone path to filter source triangles so "Body" extracts skin +
+// cloth and "Armor" extracts only the metal pieces.
+export const BODY_MESH_STEMS: readonly string[] = ['Body', 'Hair', 'Shirt', 'Pants', 'Shoes']
+export const ARMOR_MESH_STEMS: readonly string[] = ['Helmet', 'Platebody', 'Platelegs']
+
 export const ACTIVE_BONES: readonly string[] = [
   'Hips',
   'Spine',
@@ -106,6 +112,12 @@ export type CreatorPart = {
   // Transform/color edits apply to the whole group. Used for multi-primitive
   // props like a sword (blade + grip + pommel + crossguard).
   groupMeshNames?: string[]
+  // Mesh-stem allowlist for skinned bone extraction. When set, only
+  // triangles from source meshes whose name-stem is in this list count
+  // towards the clone — e.g. ['Helmet', 'Platebody', 'Platelegs'] for
+  // armour-only clones, ['Body', 'Hair', 'Shirt', 'Pants', 'Shoes'] for
+  // body/cloth clones. Without it, all skinned source meshes contribute.
+  meshFilter?: string[]
 }
 
 // Runtime state for one creator part: data + the Babylon objects it owns.
@@ -314,22 +326,6 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
       m1.glbMeshes, m1.skeleton, 'Hand Hold.R', [90, 90, 45],
     )
 
-    // ─── DEBUG: render store's native knight GLB next to Custom ───
-    // Side-by-side visual comparison of the native asset-store export vs
-    // our fbx2gltf-converted knight.glb. Place at x=54.5, just past
-    // Custom (x=53). Remove this block once the comparison's done.
-    try {
-      const nativeResult = await SceneLoader.ImportMeshAsync('', '/models/', 'knight_native.glb', scene)
-      const nativeRoot =
-        nativeResult.meshes.find((m) => m.name === '__root__') ?? nativeResult.meshes[0]
-      nativeRoot.name = 'KnightNative'
-      nativeRoot.position = new Vector3(54.5, 0, 0)
-      // Stop any auto-playing animations — we just want a static A/B.
-      nativeResult.animationGroups.forEach((g) => g.stop())
-      console.log(`[editor] DEBUG: native knight GLB loaded next to Custom — ${nativeResult.meshes.length} meshes`)
-    } catch (err) {
-      console.warn('[editor] DEBUG: native knight GLB load failed:', err)
-    }
 
     const api: EditorSceneApi = {
       models: [m1, m2, m3],

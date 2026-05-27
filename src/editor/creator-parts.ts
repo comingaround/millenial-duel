@@ -156,7 +156,7 @@ function createClonePart(
     return placeholderClone(scene, part, customModel)
   }
 
-  const geom = extractBoneGeometry(sourceModel, part.boneName)
+  const geom = extractBoneGeometry(sourceModel, part.boneName, part.meshFilter)
   if (!geom) {
     console.warn(`[creator] no skinned geometry found for bone '${part.boneName}' on ${sourceModel.name}; using sphere placeholder`)
     return placeholderClone(scene, part, customModel)
@@ -536,6 +536,7 @@ function applyGroupTransform(
 function extractBoneGeometry(
   source: ModelInstance,
   boneName: string,
+  meshFilter?: string[],
 ): { positions: Float32Array; indices: number[]; normals: number[]; firstSourceMaterial: any } | null {
   const outPositions: number[] = []
   const outIndices: number[] = []
@@ -551,6 +552,13 @@ function extractBoneGeometry(
     if (!(m instanceof Mesh)) continue
     if (m.getTotalVertices() === 0) continue
     if (!m.skeleton) continue
+    // Mesh-stem filter (body vs armor): skip meshes not in the allowlist.
+    // Stem strips Babylon's "_primitive<N>" suffix added for multi-material
+    // primitives — so "Helmet_primitive0" still matches "Helmet" in the list.
+    if (meshFilter) {
+      const stem = m.name.split('_primitive')[0]
+      if (!meshFilter.includes(stem)) continue
+    }
     const boneIdx = m.skeleton.bones.findIndex((b) => b.name === boneName)
     if (boneIdx < 0) continue
     const bone = m.skeleton.bones[boneIdx]

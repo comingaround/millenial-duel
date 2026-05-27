@@ -951,7 +951,7 @@ export function createEngine(
       // Custom model. Returns the new part's id (or null if the bone
       // wasn't found / Custom model not loaded). Gated to Custom (idx 2).
       // For shape='clone', Model 1 is used as the geometry source.
-      addCreatorPart: (shape: CreatorShape, boneName: string): string | null => {
+      addCreatorPart: (shape: CreatorShape, boneName: string, meshFilter?: string[]): string | null => {
         const customIdx = 2
         if (customIdx >= ed.models.length) return null
         const customModel = ed.models[customIdx]
@@ -959,6 +959,7 @@ export function createEngine(
         // the part — saves the rest of the pipeline from a sentinel value.
         if (!customModel.skeleton.bones.find((b) => b.name === boneName)) return null
         const part = defaultPartFor(boneName, shape)
+        if (meshFilter && meshFilter.length > 0) part.meshFilter = meshFilter
         const inst = createPartMesh(scene, part, customModel, ed.models[0])
         customModel.creatorParts.set(part.id, inst)
         bumpCreatorParts()
