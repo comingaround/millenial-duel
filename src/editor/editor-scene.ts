@@ -328,11 +328,11 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
     const weaponLibrary = await loadWeaponLibrary(scene)
 
     // Make the axe Model 1's primary weapon — hides its stock sword on
-    // Hand Hold.R and attaches the textured axe at rotation (90, 90, 45)
+    // Hand Hold.R and attaches the textured axe at rotation (90, 90, 30)
     // degrees. Model 2 keeps its sword for combat-sparring contrast.
     attachWeaponToHand(
       scene, weaponLibrary, 'axe_textured',
-      m1.glbMeshes, m1.skeleton, 'Hand Hold.R', [90, 90, 45],
+      m1.glbMeshes, m1.skeleton, 'Hand Hold.R', [90, 90, 30],
     )
 
 
@@ -379,9 +379,16 @@ const WEAPON_CATALOGUE: Array<{
   // Fraction of the total mesh height (from the bottom) that counts as
   // "handle" for the extension. Default 0.6 = bottom 60% is handle.
   handleFractionFromBottom?: number
+  // When true, shifts all vertices up so the lowest point (handle tip)
+  // sits at mesh-local Y=0. The hand bone's origin is therefore at the
+  // END of the pole — knight grips the handle tip, not the middle. Lets
+  // the handle's length grow/shrink without shifting where the model
+  // holds it.
+  gripAtBottom?: boolean
 }> = [
-  // 0.4m extension → total ≈ 1.0m, roughly sword-length.
-  { file: 'axe_textured.glb', stem: 'axe_textured', kind: 'axe', targetMaxDim: 0.6, handleExtensionM: 0.4, handleFractionFromBottom: 0.6 },
+  // 0.12m extension → total ≈ 0.77m (10% shorter than the 0.86m the
+  // 0.2 extension yielded). Grip anchored at handle tip.
+  { file: 'axe_textured.glb', stem: 'axe_textured', kind: 'axe', targetMaxDim: 0.6, handleExtensionM: 0.12, handleFractionFromBottom: 0.6, gripAtBottom: true },
 ]
 
 export async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntry[]> {
@@ -413,8 +420,15 @@ export async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntr
       if (entry.handleExtensionM && entry.handleExtensionM > 0) {
         extendWeaponHandle(meshes, entry.handleExtensionM, entry.handleFractionFromBottom ?? 0.6)
       }
+      // Optional grip-at-bottom shift — moves the mesh origin to the
+      // handle tip so the hand bone grips the END of the pole (not the
+      // middle). Runs LAST so any length changes from extendWeaponHandle
+      // are reflected before measuring.
+      if (entry.gripAtBottom) {
+        shiftMeshOriginToBottom(meshes)
+      }
       library.push({ stem: entry.stem, meshes, kind: entry.kind })
-      console.log(`[editor] weapon library: '${entry.stem}' (${entry.kind}) — ${meshes.length} mesh(es), normalized to ${entry.targetMaxDim}m${entry.handleExtensionM ? ` + ${entry.handleExtensionM}m handle stretch` : ''}`)
+      console.log(`[editor] weapon library: '${entry.stem}' (${entry.kind}) — ${meshes.length} mesh(es), normalized to ${entry.targetMaxDim}m${entry.handleExtensionM ? ` + ${entry.handleExtensionM}m handle stretch` : ''}${entry.gripAtBottom ? ' + grip-at-bottom' : ''}`)
     } catch (err) {
       console.warn(`[editor] failed to load weapon '${entry.stem}':`, err)
     }
@@ -521,6 +535,34 @@ function extendWeaponHandle(
       if (y >= handleTopY) continue
       const fraction = (handleTopY - y) / handleLen
       newPositions[i] = y - fraction * extensionM
+    }
+    m.setVerticesData(VertexBuffer.PositionKind, newPositions, true)
+    m.refreshBoundingInfo()
+  }
+}
+
+// Translate all vertices upward by -minY so the lowest point of the
+// mesh lands at Y=0 in mesh-local space. Used for weapons with
+// `gripAtBottom: true` — the bone-attached mesh's local origin then
+// coincides with the handle's tip, so the knight grips the END of the
+// pole, not the middle. Re-running `extendWeaponHandle` first ensures
+// "bottom" reflects the post-stretch handle length.
+function shiftMeshOriginToBottom(meshes: Mesh[]): void {
+  let minY = Infinity
+  for (const m of meshes) {
+    const positions = m.getVerticesData(VertexBuffer.PositionKind)
+    if (!positions) continue
+    for (let i = 1; i < positions.length; i += 3) {
+      if (positions[i] < minY) minY = positions[i]
+    }
+  }
+  if (!Number.isFinite(minY) || Math.abs(minY) < 1e-5) return
+  for (const m of meshes) {
+    const positions = m.getVerticesData(VertexBuffer.PositionKind)
+    if (!positions) continue
+    const newPositions = new Float32Array(positions)
+    for (let i = 1; i < positions.length; i += 3) {
+      newPositions[i] -= minY
     }
     m.setVerticesData(VertexBuffer.PositionKind, newPositions, true)
     m.refreshBoundingInfo()

@@ -98,12 +98,12 @@ export function createHero(scene: Scene, weaponLibrary?: WeaponLibraryEntry[]): 
       const headNode = headBone?._linkedTransformNode ?? null
 
       // Primary weapon: replace stock sword with the axe-textured library
-      // entry. Rotation (90, 90, 45) deg matches what the user dialled
-      // in via the Creator on Model 3.
+      // entry. Rotation (90, 90, 30) deg — slight forward lean from the
+      // hand for a more natural battle-axe grip.
       if (weaponLibrary && skeleton) {
         attachWeaponToHand(
           scene, weaponLibrary, 'axe_textured',
-          result.meshes, skeleton, 'Hand Hold.R', [90, 90, 45],
+          result.meshes, skeleton, 'Hand Hold.R', [90, 90, 30],
         )
       }
 
