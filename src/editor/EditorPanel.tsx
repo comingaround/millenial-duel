@@ -457,6 +457,161 @@ export default function EditorPanel() {
   const findPose = (id?: string): Pose | undefined =>
     id ? displayedPoses.find((p) => p.id === id) : undefined
 
+  // ─── Mirror L↔R helpers ───
+  // The knight's rest pose is ASYMMETRIC (artist baked in stance offsets:
+  // weight-shift, foot rotation, etc — Upper Leg.L vs mirror(Upper Leg.R)
+  // diverges by up to 1.9 in quaternion components). So a naive
+  // "mirror absolute rotation" formula produces garbage. The correct
+  // approach is delta-based:
+  //   delta_R = inv(rest_R) ⊗ pose_R          (R's rotation away from its rest)
+  //   mirror_d = (x, -y, -z, w) of delta_R    (reflect the delta across YZ)
+  //   pose_L  = rest_L ⊗ mirror_d             (apply mirrored delta to L's rest)
+  // Same formula works for midline bones (Hips/Spine/etc) since rest_R
+  // and rest_L collapse to the same value when bone name doesn't change.
+  const mirrorBoneName = (name: string): string => {
+    if (name.endsWith('.L')) return name.slice(0, -2) + '.R'
+    if (name.endsWith('.R')) return name.slice(0, -2) + '.L'
+    return name
+  }
+  // Unit-quaternion ops on plain [x,y,z,w] arrays so we don't need a
+  // Babylon dependency in this React file.
+  const qInv = (q: [number, number, number, number]): [number, number, number, number] =>
+    [-q[0], -q[1], -q[2], q[3]]
+  const qMul = (
+    a: [number, number, number, number],
+    b: [number, number, number, number],
+  ): [number, number, number, number] => [
+    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+  ]
+  const mirrorRotations = (r: RotationMap, rest: RotationMap): RotationMap => {
+    const out: RotationMap = {}
+    for (const [bone, q] of Object.entries(r)) {
+      const targetBone = mirrorBoneName(bone)
+      const restSource = rest[bone]
+      const restTarget = rest[targetBone]
+      if (!restSource || !restTarget) {
+        // Bone not in rest data — fall back to naive mirror so we
+        // produce SOMETHING, but log so it's debuggable.
+        // eslint-disable-next-line no-console
+        console.warn(`[mirror] missing rest data for '${bone}' or '${targetBone}'; using naive mirror`)
+        out[targetBone] = [q[0], -q[1], -q[2], q[3]]
+        continue
+      }
+      // delta in source-bone's rest frame
+      const delta = qMul(qInv(restSource), q)
+      // reflect delta across YZ plane
+      const mirrored: [number, number, number, number] = [delta[0], -delta[1], -delta[2], delta[3]]
+      // re-apply on the target bone's rest
+      out[targetBone] = qMul(restTarget, mirrored)
+    }
+    return out
+  }
+  const mirrorPositions = (p?: PositionMap): PositionMap | undefined => {
+    if (!p) return undefined
+    const out: PositionMap = {}
+    for (const [bone, pos] of Object.entries(p)) {
+      out[mirrorBoneName(bone)] = [-pos[0], pos[1], pos[2]]
+    }
+    return out
+  }
+  const mirrorDisplacement = (
+    d?: [number, number, number],
+  ): [number, number, number] | undefined => {
+    if (!d) return undefined
+    return [-d[0], d[1], d[2]]
+  }
+
+  // Create a mirrored copy of an animation — clones every non-system
+  // anchor it references with L↔R-flipped rotations + positions, builds
+  // a new AnimDef referencing the new anchors. Persists via existing
+  // debounced save effect.
+  // TODO: when non-symmetric initial poses are authored, also mirror the
+  // referenced pose. For now Initial Position is bilaterally symmetric.
+  // Shared by all mirror handlers — pulls rest pose (active editor model;
+  // identical across all knights since they share the GLB) needed for
+  // delta-based mirroring against an asymmetric rig.
+  const getRestRotations = (): RotationMap => {
+    const restAnchor = (window as any).__editor?.getInitialAnchor?.() as Anchor | null
+    if (!restAnchor) {
+      // eslint-disable-next-line no-console
+      console.warn('[mirror] no rest pose available — mirror will be incorrect for this asymmetric rig')
+      return {}
+    }
+    return restAnchor.rotations
+  }
+  const newMirrorId = (prefix: 'anch' | 'anim' | 'pose' = 'anch') =>
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+
+  const onMirrorPose = (poseId: string) => {
+    const src = displayedPoses.find((p) => p.id === poseId)
+    if (!src || src.system) return
+    const rest = getRestRotations()
+    const newPose: Pose = {
+      id: newMirrorId('pose'),
+      name: `${src.name} (mirrored)`,
+      rotations: mirrorRotations(src.rotations, rest),
+      positions: mirrorPositions(src.positions),
+    }
+    setPoses((curr) => [...curr, newPose])
+  }
+  const onMirrorAnchor = (anchorId: string) => {
+    const src = displayedAnchors.find((a) => a.id === anchorId)
+    if (!src || src.system) return
+    const rest = getRestRotations()
+    const newAnchor: Anchor = {
+      id: newMirrorId('anch'),
+      name: `${src.name} (mirrored)`,
+      rotations: mirrorRotations(src.rotations, rest),
+      positions: mirrorPositions(src.positions),
+    }
+    setAnchors((curr) => [...curr, newAnchor])
+  }
+
+  const onMirrorAnimation = (animId: string) => {
+    const orig = animations.find((a) => a.id === animId)
+    if (!orig) return
+    const rest = getRestRotations()
+    const newId = (p: 'anch' | 'anim' = 'anch') => newMirrorId(p)
+    const anchorIdMap = new Map<string, string>()
+    const newAnchors: Anchor[] = []
+    for (const kf of orig.keyframes) {
+      if (anchorIdMap.has(kf.anchorId)) continue
+      const src = displayedAnchors.find((a) => a.id === kf.anchorId)
+      if (!src) continue
+      // System anchors (e.g. "Initial Position" — the rest pose) are
+      // their own mirror by definition (the rest pose mirrors to itself
+      // in delta math because delta=identity); keep references as-is.
+      if (src.system) continue
+      const id = newId()
+      newAnchors.push({
+        id,
+        name: `${src.name} (mirrored)`,
+        rotations: mirrorRotations(src.rotations, rest),
+        positions: mirrorPositions(src.positions),
+      })
+      anchorIdMap.set(src.id, id)
+    }
+    const newAnim: AnimDef = {
+      id: newId('anim'),
+      name: `${orig.name} (mirrored)`,
+      initialPoseId: orig.initialPoseId,
+      keyframes: orig.keyframes.map((kf) => ({
+        anchorId: anchorIdMap.get(kf.anchorId) ?? kf.anchorId,
+        time: kf.time,
+        displacement: mirrorDisplacement(kf.displacement),
+      })),
+      // heroKey / oppKey intentionally NOT carried over — avoids key
+      // collision with the original; user binds explicitly.
+    }
+    setAnchors((curr) => [...curr, ...newAnchors])
+    setAnimations((curr) => [...curr, newAnim])
+  }
+
   const onPreviewDraft = () => {
     if (!draft) return
     const resolved = resolveKeyframes(draft.keyframes)
@@ -657,6 +812,7 @@ export default function EditorPanel() {
               onClick={() => onApplyPose(p)}
               onDelete={p.system ? undefined : () => onDeletePose(p.id)}
               onRename={p.system ? undefined : promptRename(p.name, (n) => onRenamePose(p.id, n))}
+              onMirror={p.system ? undefined : () => onMirrorPose(p.id)}
             />
           ))
         )}
@@ -674,6 +830,7 @@ export default function EditorPanel() {
               onClick={() => onApplyAnchor(a)}
               onDelete={a.system ? undefined : () => onDeleteAnchor(a.id)}
               onRename={a.system ? undefined : promptRename(a.name, (n) => onRenameAnchor(a.id, n))}
+              onMirror={a.system ? undefined : () => onMirrorAnchor(a.id)}
             />
           ))
         )}
@@ -1016,6 +1173,7 @@ export default function EditorPanel() {
               onPlay={() => onPlayAnimation(a)}
               onDelete={() => onDeleteAnimation(a.id)}
               onEdit={() => onEditAnimation(a)}
+              onMirror={() => onMirrorAnimation(a.id)}
               onSetKey={(side, key) =>
                 setAnimations((curr) =>
                   curr.map((x) =>
@@ -1129,12 +1287,13 @@ function DispInput({
 }
 
 function AnimRow({
-  anim, onPlay, onDelete, onEdit, onSetKey,
+  anim, onPlay, onDelete, onEdit, onMirror, onSetKey,
 }: {
   anim: AnimDef
   onPlay: () => void
   onDelete: () => void
   onEdit: () => void
+  onMirror: () => void
   onSetKey: (side: 'hero' | 'opp', key: string) => void
 }) {
   return (
@@ -1146,6 +1305,7 @@ function AnimRow({
           <span style={{ marginLeft: 6, opacity: 0.45, fontSize: 10 }}>({anim.keyframes.length} kfs)</span>
         </span>
         <span style={penStyle} onClick={onEdit} title="Edit (name, keyframes, timing)">✎</span>
+        <span style={penStyle} onClick={onMirror} title="Mirror left↔right (clone as opposite-side swing)">↔</span>
         <span style={delStyle} onClick={onDelete} title="Delete">×</span>
       </div>
       <div style={{ display: 'flex', gap: 6, fontSize: 10, opacity: 0.75 }}>
@@ -1182,6 +1342,7 @@ function ListRow({
   onClick,
   onDelete,
   onRename,
+  onMirror,
   icon,
 }: {
   name: string
@@ -1189,6 +1350,7 @@ function ListRow({
   onClick: () => void
   onDelete?: () => void
   onRename?: () => void
+  onMirror?: () => void
   icon?: string
 }) {
   return (
@@ -1201,6 +1363,11 @@ function ListRow({
       {onRename ? (
         <span style={penStyle} onClick={onRename} title="Rename">
           ✎
+        </span>
+      ) : null}
+      {onMirror ? (
+        <span style={penStyle} onClick={onMirror} title="Mirror left↔right (clone)">
+          ↔
         </span>
       ) : null}
       {onDelete ? (

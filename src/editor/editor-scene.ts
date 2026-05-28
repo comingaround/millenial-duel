@@ -335,6 +335,21 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
       m1.glbMeshes, m1.skeleton, 'Hand Hold.R', [90, 90, 30],
     )
 
+    // ─── DEBUG: knight v3 (fixed-export) render next to Custom ───
+    // Sister re-exported the RPG knight with polygon-clipping fix.
+    // Place at x=54.5 for A/B against our current knight.glb. Remove
+    // this block once the comparison is done.
+    try {
+      const r = await SceneLoader.ImportMeshAsync('', '/models/', 'knight_v3_native.glb', scene)
+      const root = r.meshes.find((m) => m.name === '__root__') ?? r.meshes[0]
+      root.name = 'KnightV3'
+      root.position = new Vector3(54.5, 0, 0)
+      r.animationGroups.forEach((g) => g.stop())
+      console.log(`[editor] DEBUG: KnightV3 (fixed-export) loaded at (54.5, 0, 0) — ${r.meshes.length} meshes`)
+    } catch (err) {
+      console.warn('[editor] DEBUG: knight_v3_native.glb load failed:', err)
+    }
+
 
 
     const api: EditorSceneApi = {
