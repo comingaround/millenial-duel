@@ -389,6 +389,9 @@ const WEAPON_CATALOGUE: Array<{
   // 0.12m extension → total ≈ 0.77m (10% shorter than the 0.86m the
   // 0.2 extension yielded). Grip anchored at handle tip.
   { file: 'axe_textured.glb', stem: 'axe_textured', kind: 'axe', targetMaxDim: 0.6, handleExtensionM: 0.12, handleFractionFromBottom: 0.6, gripAtBottom: true },
+  // Meshy v5 generation — high-poly PBR-textured double-edge axe.
+  // 1.6m total ≈ polearm scale, fits the long-haft silhouette.
+  { file: 'double_edge_axe.glb', stem: 'double_edge_axe', kind: 'axe', targetMaxDim: 1.6 },
 ]
 
 export async function loadWeaponLibrary(scene: Scene): Promise<WeaponLibraryEntry[]> {

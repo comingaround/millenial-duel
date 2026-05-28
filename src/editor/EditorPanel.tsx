@@ -97,10 +97,12 @@ export default function EditorPanel() {
     visible: boolean
   } | null>(null)
   // Sync-play: which anim to fire on each model when "Play both" is clicked
-  // One sync-play selection per model (indexed by model idx). Variable
-  // length so a dynamically-added 4th/5th knight gets its own slot.
-  // Custom (idx 2) gets its own dropdown, independent of Model 2.
-  const [syncAnims, setSyncAnims] = useState<string[]>([])
+  // Sync-play session — user explicitly opts models in, then defines
+  // synchronized "steps" where each model picks an anim. All anims in
+  // a step fire at t=0 of that step; next step starts after the
+  // longest anim in the current step finishes.
+  const [syncModels, setSyncModels] = useState<number[]>([])
+  const [syncSteps, setSyncSteps] = useState<Array<{ id: string; anims: Record<number, string> }>>([])
   const [animations, setAnimations] = useState<AnimDef[]>([])
   const [draft, setDraft] = useState<DraftAnim | null>(null)
   const [hydrated, setHydrated] = useState(false)
@@ -511,26 +513,75 @@ export default function EditorPanel() {
     window.__editor?.playAnimation(resolved)
   }
 
-  // Sync-play: fire one anim per model simultaneously. Each model has
-  // its own slot in `syncAnims` (indexed by model idx) so picking an
-  // anim on Custom doesn't bleed into Model 2's dropdown.
+  // Sync-play: run a multi-step sequence. Each step fires its anims on
+  // all participating models simultaneously; next step starts after the
+  // longest anim in the current step finishes. No cancellation — fire
+  // again and animations overlap; use Reset to recover.
   const onPlaySync = () => {
     const ed = window.__editor as any
-    const fire = (modelIdx: number, animId: string) => {
-      if (!animId) return
-      const anim = animations.find((a) => a.id === animId)
-      if (!anim) return
-      const resolved = resolveKeyframes(anim.keyframes)
-      if (resolved.length < 2) return
-      const initial = findPose(anim.initialPoseId)
-      const initialPose = initial
-        ? { rotations: initial.rotations, positions: initial.positions }
-        : undefined
-      ed?.playAnimationOnModel?.(modelIdx, resolved, initialPose)
+    let cumulativeMs = 0
+    for (const step of syncSteps) {
+      let maxDurS = 0
+      // Pass 1: compute step duration so timing is independent of fire order.
+      for (const modelIdx of syncModels) {
+        const animId = step.anims[modelIdx]
+        if (!animId) continue
+        const anim = animations.find((a) => a.id === animId)
+        if (!anim) continue
+        const resolved = resolveKeyframes(anim.keyframes)
+        if (resolved.length < 2) continue
+        const lastT = resolved[resolved.length - 1].time
+        if (lastT > maxDurS) maxDurS = lastT
+      }
+      // Pass 2: schedule each model's anim at the step's start moment.
+      const startAt = cumulativeMs
+      for (const modelIdx of syncModels) {
+        const animId = step.anims[modelIdx]
+        if (!animId) continue
+        const anim = animations.find((a) => a.id === animId)
+        if (!anim) continue
+        const resolved = resolveKeyframes(anim.keyframes)
+        if (resolved.length < 2) continue
+        const initial = findPose(anim.initialPoseId)
+        const initialPose = initial
+          ? { rotations: initial.rotations, positions: initial.positions }
+          : undefined
+        setTimeout(() => {
+          ed?.playAnimationOnModel?.(modelIdx, resolved, initialPose)
+        }, startAt)
+      }
+      cumulativeMs += maxDurS * 1000
     }
-    for (let i = 0; i < models.length; i++) {
-      fire(i, syncAnims[i] ?? '')
-    }
+  }
+  // Sync-play state mutators.
+  const addSyncModel = (idx: number) => {
+    setSyncModels((curr) => (curr.includes(idx) ? curr : [...curr, idx]))
+  }
+  const removeSyncModel = (idx: number) => {
+    setSyncModels((curr) => curr.filter((i) => i !== idx))
+    setSyncSteps((curr) =>
+      curr.map((s) => {
+        const next = { ...s.anims }
+        delete next[idx]
+        return { ...s, anims: next }
+      }),
+    )
+  }
+  const addSyncStep = () => {
+    setSyncSteps((curr) => [
+      ...curr,
+      { id: `step_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, anims: {} },
+    ])
+  }
+  const removeSyncStep = (stepId: string) => {
+    setSyncSteps((curr) => curr.filter((s) => s.id !== stepId))
+  }
+  const setStepAnim = (stepId: string, modelIdx: number, animId: string) => {
+    setSyncSteps((curr) =>
+      curr.map((s) =>
+        s.id !== stepId ? s : { ...s, anims: { ...s.anims, [modelIdx]: animId } },
+      ),
+    )
   }
 
   return (
@@ -842,47 +893,114 @@ export default function EditorPanel() {
         </div>
       )}
 
-      {/* Sync play — fire one anim per model simultaneously */}
+      {/* Sync play — sequenced multi-step animation across opted-in models */}
       <Section label="Sync Play">
         {models.length === 0 || animations.length === 0 ? (
           <Empty text={animations.length === 0 ? '(save anims first)' : '(no models)'} />
         ) : (
           <>
-            {models.map((mName, idx) => {
-              const value = syncAnims[idx] ?? ''
-              const setter = (next: string) => {
-                setSyncAnims((curr) => {
-                  const copy = [...curr]
-                  while (copy.length <= idx) copy.push('')
-                  copy[idx] = next
-                  return copy
-                })
-              }
-              return (
-                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                  <span style={{ fontSize: 11, opacity: 0.7, width: 60 }}>{mName}</span>
-                  <select
-                    value={value}
-                    onChange={(e) => setter(e.target.value)}
-                    style={{ ...selectStyle, flex: 1 }}
-                  >
-                    <option value="" style={{ background: '#1c1f24', color: '#fff' }}>(none)</option>
-                    {animations.map((a) => (
-                      <option key={a.id} value={a.id} style={{ background: '#1c1f24', color: '#fff' }}>
-                        {a.name}
+            {/* Models in session — stacked column: label, chips, dropdown.
+                The "+ add" stays in its own row whether chips are present
+                or not so it's always findable. */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 6 }}>
+              <span style={{ fontSize: 10, opacity: 0.55, letterSpacing: 0.5 }}>MODELS</span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {syncModels.length === 0 ? (
+                  <span style={{ fontSize: 10, opacity: 0.45 }}>(none yet)</span>
+                ) : (
+                  syncModels.map((idx) => (
+                    <span key={idx} style={syncModelChipStyle}>
+                      {models[idx] ?? `#${idx}`}
+                      <span
+                        style={{ marginLeft: 4, cursor: 'pointer', opacity: 0.7 }}
+                        onClick={() => removeSyncModel(idx)}
+                        title="Remove from session"
+                      >×</span>
+                    </span>
+                  ))
+                )}
+              </div>
+              {models.some((_, i) => !syncModels.includes(i)) ? (
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10)
+                    if (Number.isFinite(n)) addSyncModel(n)
+                  }}
+                  style={{ ...selectStyle, fontSize: 10, padding: '3px 6px', width: '100%' }}
+                >
+                  <option value="" style={{ background: '#1c1f24', color: '#fff' }}>+ add model</option>
+                  {models.map((mName, i) =>
+                    syncModels.includes(i) ? null : (
+                      <option key={i} value={i} style={{ background: '#1c1f24', color: '#fff' }}>
+                        {mName}
                       </option>
-                    ))}
-                  </select>
+                    ),
+                  )}
+                </select>
+              ) : null}
+            </div>
+            {/* Steps list */}
+            {syncSteps.map((step, sIdx) => (
+              <div key={step.id} style={syncStepStyle}>
+                <div style={syncStepHeaderStyle}>
+                  <span>Step {sIdx + 1}</span>
+                  <span
+                    style={{ cursor: 'pointer', opacity: 0.55, fontWeight: 700 }}
+                    onClick={() => removeSyncStep(step.id)}
+                    title="Delete step"
+                  >×</span>
                 </div>
-              )
-            })}
+                {syncModels.length === 0 ? (
+                  <div style={{ fontSize: 10, opacity: 0.45, padding: '2px 0' }}>
+                    (add a model to the session first)
+                  </div>
+                ) : (
+                  syncModels.map((idx) => (
+                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                      <span style={{ fontSize: 10, opacity: 0.7, width: 60 }}>{models[idx] ?? `#${idx}`}</span>
+                      <select
+                        value={step.anims[idx] ?? ''}
+                        onChange={(e) => setStepAnim(step.id, idx, e.target.value)}
+                        style={{ ...selectStyle, flex: 1, fontSize: 10 }}
+                      >
+                        <option value="" style={{ background: '#1c1f24', color: '#fff' }}>(none)</option>
+                        {animations.map((a) => (
+                          <option key={a.id} value={a.id} style={{ background: '#1c1f24', color: '#fff' }}>
+                            {a.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ))
+                )}
+              </div>
+            ))}
+            <button
+              style={{ ...btnSecondary, width: '100%', marginTop: 4 }}
+              onClick={addSyncStep}
+            >
+              + Add step
+            </button>
             <button
               style={{ ...btnPrimary, width: '100%', marginTop: 6 }}
               onClick={onPlaySync}
-              disabled={!syncAnims.some((s) => !!s)}
+              disabled={syncSteps.length === 0 || syncModels.length === 0}
             >
-              ▶ Play all
+              ▶ Play all steps
             </button>
+            {syncSteps.length > 0 || syncModels.length > 0 ? (
+              <button
+                style={{ ...btnGhost, marginTop: 4 }}
+                onClick={() => {
+                  setSyncModels([])
+                  setSyncSteps([])
+                }}
+                title="Drop all models + steps from the sync session"
+              >
+                Clear
+              </button>
+            ) : null}
           </>
         )}
       </Section>
@@ -1187,6 +1305,36 @@ const btnPrimary: CSSProperties = {
 const btnSecondary: CSSProperties = {
   ...btnPrimary,
   background: 'rgba(255, 255, 255, 0.07)',
+}
+// Sync-play model chip — opted-in model identifier with × to remove.
+const syncModelChipStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 2,
+  fontSize: 10,
+  padding: '2px 6px',
+  background: 'rgba(95, 130, 200, 0.35)',
+  border: '1px solid rgba(95, 130, 200, 0.55)',
+  borderRadius: 10,
+  color: '#fff',
+}
+// Sync-play step wrapper — visually grouped per-step row of model→anim
+// selections.
+const syncStepStyle: CSSProperties = {
+  background: 'rgba(255, 255, 255, 0.04)',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  borderRadius: 4,
+  padding: '6px 8px',
+  marginBottom: 6,
+}
+const syncStepHeaderStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  fontSize: 11,
+  fontWeight: 600,
+  opacity: 0.85,
+  marginBottom: 4,
 }
 
 const btnGhost: CSSProperties = {
