@@ -56,11 +56,14 @@ export function createHero(scene: Scene, weaponLibrary?: WeaponLibraryEntry[]): 
       root.scaling = root.scaling.scale(1.2)
       root.rotation = new Vector3(0, Math.PI, 0)   // face opponent (+Z)
 
-      // Materials
+      // Materials — keep PBR materials from the GLB (v3 ships proper
+      // hand-painted PBR with textures). Only override StandardMaterial
+      // slots (legacy path for the older flat-shaded knight).
       const matCache = new Map<string, StandardMaterial>()
       for (const m of result.meshes) {
         if (!(m instanceof Mesh) || m.getTotalVertices() === 0) continue
         if (!m.material) continue
+        if (m.material.getClassName?.() !== 'StandardMaterial') continue
         const matName = m.material.name
         let mat = matCache.get(matName)
         if (!mat) {
@@ -97,15 +100,10 @@ export function createHero(scene: Scene, weaponLibrary?: WeaponLibraryEntry[]): 
       const headBone = skeleton?.bones.find((b) => b.name === 'Head')
       const headNode = headBone?._linkedTransformNode ?? null
 
-      // Primary weapon: replace stock sword with the axe-textured library
-      // entry. Rotation (90, 90, 30) deg — slight forward lean from the
-      // hand for a more natural battle-axe grip.
-      if (weaponLibrary && skeleton) {
-        attachWeaponToHand(
-          scene, weaponLibrary, 'axe_textured',
-          result.meshes, skeleton, 'Hand Hold.R', [90, 90, 30],
-        )
-      }
+      // Hero keeps the stock sword from the v3 knight GLB — no weapon
+      // override at character init. Weapon library still loaded so the
+      // Creator can equip them on the Custom model.
+      void weaponLibrary  // keep param for future use
 
       console.log(
         `[hero] knight loaded — ${result.meshes.length} meshes`,

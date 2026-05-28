@@ -1209,8 +1209,14 @@ export function createEngine(
         id: '__initial__',
         name: 'Initial position',
         rotations: { ...active().restPose },
+        positions: { ...active().restPositions },
         system: true as const,
       }),
+      // Legacy rest pose of the older knight rig — used ONCE by the
+      // EditorPanel hydration to retarget saved anchors/poses authored
+      // against the old asset to the v3 rig. Null if backup GLB is
+      // missing (post-retarget cleanup).
+      getLegacyRestPose: () => ed.legacyRestPose,
     }
 
     if (cameraMode === 'editor') {

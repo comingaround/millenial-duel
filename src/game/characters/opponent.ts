@@ -46,11 +46,13 @@ export function createOpponent(scene: Scene): Promise<OpponentApi | null> {
       root.scaling = root.scaling.scale(1.2)
       root.rotation = new Vector3(0, 0, 0)
 
-      // Materials
+      // Materials — keep PBR materials from the GLB. Only override
+      // StandardMaterial slots (legacy flat-shaded path).
       const matCache = new Map<string, StandardMaterial>()
       for (const m of result.meshes) {
         if (!(m instanceof Mesh) || m.getTotalVertices() === 0) continue
         if (!m.material) continue
+        if (m.material.getClassName?.() !== 'StandardMaterial') continue
         const matName = m.material.name
         let mat = matCache.get(matName)
         if (!mat) {

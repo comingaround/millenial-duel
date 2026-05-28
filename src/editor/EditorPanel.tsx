@@ -106,6 +106,12 @@ export default function EditorPanel() {
   const [animations, setAnimations] = useState<AnimDef[]>([])
   const [draft, setDraft] = useState<DraftAnim | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  // Set only when (a) library.json was loaded with schemaVersion=2 OR
+  // (b) we successfully ran the v1→v3 retarget pass during hydration.
+  // Save effect writes `schemaVersion: 2` ONLY when this is true — so a
+  // failed/skipped retarget never poisons the file with a "no retarget
+  // needed" marker on unretargeted data.
+  const [libraryRetargeted, setLibraryRetargeted] = useState(false)
   const [editorReady, setEditorReady] = useState(false)
   // Bumped by the engine when any creator-part mutates. Used as a save
   // effect dep so persistence fires on add/update/delete. Parts live on
@@ -123,18 +129,105 @@ export default function EditorPanel() {
     let unsub: (() => void) | null = null
     let cancelled = false
 
+    // Wait for the editor's rest pose to be available, then run an
+    // optional one-time retarget. Library.json from before the v3-knight
+    // swap was authored against the old rig's rest, so the same
+    // absolute local rotations and Hips positions look wrong on v3
+    // ("hero sinks under the ground"). Math:
+    //   delta = inv(restOld) * absoluteOld
+    //   absoluteV3 = restV3 * delta
+    // For positions: pos_v3 = restV3.pos + (pos_old - restOld.pos).
+    const retargetAnchorOnce = (a: Anchor, oldRest: { rotations: RotationMap; positions: PositionMap }, newRest: { rotations: RotationMap; positions: PositionMap }): Anchor => {
+      const rotations: RotationMap = {}
+      for (const [bone, q] of Object.entries(a.rotations)) {
+        const qOld = oldRest.rotations[bone]
+        const qNew = newRest.rotations[bone]
+        if (!qOld || !qNew) { rotations[bone] = q; continue }
+        // delta = inv(qOld) * q
+        const inv: [number, number, number, number] = [-qOld[0], -qOld[1], -qOld[2], qOld[3]]
+        const ax=inv[0], ay=inv[1], az=inv[2], aw=inv[3]
+        const bx=q[0], by=q[1], bz=q[2], bw=q[3]
+        const dx = aw*bx + ax*bw + ay*bz - az*by
+        const dy = aw*by - ax*bz + ay*bw + az*bx
+        const dz = aw*bz + ax*by - ay*bx + az*bw
+        const dw = aw*bw - ax*bx - ay*by - az*bz
+        // result = qNew * delta
+        const cx=qNew[0], cy=qNew[1], cz=qNew[2], cw=qNew[3]
+        rotations[bone] = [
+          cw*dx + cx*dw + cy*dz - cz*dy,
+          cw*dy - cx*dz + cy*dw + cz*dx,
+          cw*dz + cx*dy - cy*dx + cz*dw,
+          cw*dw - cx*dx - cy*dy - cz*dz,
+        ]
+      }
+      const positions = a.positions ? Object.fromEntries(
+        Object.entries(a.positions).map(([bone, p]) => {
+          const oldP = oldRest.positions[bone]
+          const newP = newRest.positions[bone]
+          if (!oldP || !newP) return [bone, p]
+          return [bone, [
+            newP[0] + p[0] - oldP[0],
+            newP[1] + p[1] - oldP[1],
+            newP[2] + p[2] - oldP[2],
+          ] as [number, number, number]]
+        })
+      ) : undefined
+      return { ...a, rotations, positions }
+    }
+
+    const applyLibrary = (data: any) => {
+      const needsRetarget = data.schemaVersion !== 2
+      const ed = (window as any).__editor
+      const legacy = ed?.getLegacyRestPose?.()
+      const currentRest = ed?.getInitialAnchor?.()
+      const canRetarget = needsRetarget && legacy && currentRest
+      const transform = canRetarget
+        ? (a: Anchor) => retargetAnchorOnce(a, legacy, currentRest)
+        : (a: Anchor) => a
+      if (Array.isArray(data.poses)) setPoses(data.poses.map(transform))
+      if (Array.isArray(data.anchors))
+        setAnchors(data.anchors.filter((a: Anchor) => !a.system).map(transform))
+      if (Array.isArray(data.animations)) setAnimations(data.animations)
+      // Mark retargeted ONLY when (a) source already had v2 marker OR
+      // (b) we just successfully ran the retarget. Skip-because-of-
+      // missing-legacy must NOT poison the file.
+      if (!needsRetarget) setLibraryRetargeted(true)
+      else if (canRetarget) {
+        setLibraryRetargeted(true)
+        // eslint-disable-next-line no-console
+        console.log(`[retarget] applied v1→v3 retarget to ${(data.poses?.length ?? 0)} pose(s) + ${(data.anchors?.length ?? 0)} anchor(s); next save will mark schemaVersion=2`)
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn('[retarget] needed but legacy rest pose unavailable — data loaded AS-IS, schemaVersion will NOT be written until a retarget succeeds')
+      }
+    }
+
     const hydrate = async () => {
       try {
         const res = await fetch('/api/animations')
         if (res.ok) {
           const data = await res.json()
           if (cancelled) return
-          if (Array.isArray(data.poses))      setPoses(data.poses)
-          // Filter out any persisted system anchors (e.g. Initial) — we add
-          // them back at render time.
-          if (Array.isArray(data.anchors))
-            setAnchors(data.anchors.filter((a: Anchor) => !a.system))
-          if (Array.isArray(data.animations)) setAnimations(data.animations)
+          // If retarget is needed AND legacy rest pose isn't loaded yet,
+          // wait for it (engine init is async — same poll pattern as the
+          // creator-parts hydrate below).
+          const needsRetarget = data.schemaVersion !== 2
+          if (needsRetarget) {
+            const ready = () => {
+              const ed = (window as any).__editor
+              return !!(ed?.getLegacyRestPose && ed?.getInitialAnchor?.())
+            }
+            if (!ready()) {
+              await new Promise<void>((resolve) => {
+                const iv = setInterval(() => {
+                  if (ready() || cancelled) { clearInterval(iv); resolve() }
+                }, 200)
+                setTimeout(() => { clearInterval(iv); resolve() }, 15000)
+              })
+            }
+            if (cancelled) return
+          }
+          applyLibrary(data)
           // Creator parts — hydrate the Custom model. Wait for the editor
           // API to be ready (createEditorScene is async); poll with a
           // short retry. Fires on the engine side, not React state.
@@ -245,12 +338,17 @@ export default function EditorPanel() {
       // Pull live creator parts from engine — they're not in React state,
       // they live on the Custom model directly.
       const creatorParts = (window as any).__editor?.getCreatorParts?.() ?? []
-      const payload = {
+      const payload: Record<string, unknown> = {
         poses,
         anchors: anchors.filter((a) => !a.system), // skip Initial position
         animations,
         creatorParts,
       }
+      // Only write the v2 marker AFTER a successful retarget (or if data
+      // came in already marked). A skipped retarget must not poison the
+      // file with a false-positive marker — without the marker, next
+      // load will retry.
+      if (libraryRetargeted) payload.schemaVersion = 2
       fetch('/api/animations', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -258,7 +356,7 @@ export default function EditorPanel() {
       }).catch(() => {})
     }, 500)
     return () => clearTimeout(timer)
-  }, [poses, anchors, animations, hydrated, creatorPartsRev])
+  }, [poses, anchors, animations, hydrated, creatorPartsRev, libraryRetargeted])
 
   // Expose resolved animations to window so engine.ts can dispatch keys
   useEffect(() => {

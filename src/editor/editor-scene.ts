@@ -176,6 +176,12 @@ export type EditorSceneApi = {
   allBoneNames: string[]       // shared (same rig)
   animationGroups: any[]       // baked anims from the first GLB load
   weaponLibrary: WeaponLibraryEntry[]
+  // Rest pose snapshot of an older knight asset (knight_v1_backup.glb).
+  // Used ONCE by the EditorPanel hydration path to retarget saved
+  // anchors/poses authored against the old rig to the current v3 rig.
+  // After the retarget runs + library.json is re-saved, this can be null
+  // and the legacy GLB can be removed.
+  legacyRestPose: { rotations: Record<string, [number, number, number, number]>; positions: Record<string, [number, number, number]> } | null
   // Spawn a fresh knight instance at runtime. Used by the "+ Add" button
   // in the left dashboard. Appends to `models` and returns the new index.
   addModel: (name: string, position: Vector3, yRotation: number, hideAllMeshes?: boolean) => Promise<number>
@@ -200,11 +206,17 @@ async function loadKnightInstance(
   // for each GLB slot (Skin / Metal / Blade / …). The Style tab edits these
   // so recolouring is independent per model. Baseline colour is stashed on
   // material.metadata for the Reset path.
+  // PBR materials from the GLB are KEPT AS-IS (preserves the v3 native
+  // export's textures + colours). Only StandardMaterial slots get overridden
+  // with the hand-picked MAT_COLORS palette — kept for backward-compat
+  // with the older flat-shaded knight asset.
   const matCache = new Map<string, StandardMaterial>()
   for (const m of result.meshes) {
     m.isPickable = false
     if (!(m instanceof Mesh) || m.getTotalVertices() === 0) continue
     if (!m.material) continue
+    // Skip PBR materials — they ship from the artist with the right look.
+    if (m.material.getClassName?.() !== 'StandardMaterial') continue
     const matName = m.material.name
     let mat = matCache.get(matName)
     if (!mat) {
@@ -327,36 +339,23 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
     // surfaced to the Creator's "Weapons (library)" dropdown.
     const weaponLibrary = await loadWeaponLibrary(scene)
 
-    // Make the axe Model 1's primary weapon — hides its stock sword on
-    // Hand Hold.R and attaches the textured axe at rotation (90, 90, 30)
-    // degrees. Model 2 keeps its sword for combat-sparring contrast.
-    attachWeaponToHand(
-      scene, weaponLibrary, 'axe_textured',
-      m1.glbMeshes, m1.skeleton, 'Hand Hold.R', [90, 90, 30],
-    )
+    // Model 1 keeps its stock sword from the v3 knight GLB. Weapon
+    // library still loaded so the Creator's Weapons (library) category
+    // works on Custom. Re-enable attachWeaponToHand here if you want
+    // Model 1 to default to the axe again.
+    void weaponLibrary  // keep ref for the Creator path
 
-    // ─── DEBUG: knight v3 (fixed-export) render next to Custom ───
-    // Sister re-exported the RPG knight with polygon-clipping fix.
-    // Place at x=54.5 for A/B against our current knight.glb. Remove
-    // this block once the comparison is done.
-    try {
-      const r = await SceneLoader.ImportMeshAsync('', '/models/', 'knight_v3_native.glb', scene)
-      const root = r.meshes.find((m) => m.name === '__root__') ?? r.meshes[0]
-      root.name = 'KnightV3'
-      root.position = new Vector3(54.5, 0, 0)
-      r.animationGroups.forEach((g) => g.stop())
-      console.log(`[editor] DEBUG: KnightV3 (fixed-export) loaded at (54.5, 0, 0) — ${r.meshes.length} meshes`)
-    } catch (err) {
-      console.warn('[editor] DEBUG: knight_v3_native.glb load failed:', err)
-    }
-
-
+    // One-time legacy rest pose capture — loaded ONLY to provide retarget
+    // data for anchors/poses authored against the older knight asset.
+    // Silently null if backup file is missing (post-retarget cleanup).
+    const legacyRestPose = await loadLegacyRestPose(scene, 'knight_v1_backup.glb')
 
     const api: EditorSceneApi = {
       models: [m1, m2, m3],
       allBoneNames,
       animationGroups,
       weaponLibrary,
+      legacyRestPose,
       addModel: async (name, position, yRotation, hideAllMeshes = false) => {
         const m = await loadKnightInstance(scene, name, position, yRotation, hideAllMeshes)
         api.models.push(m)
@@ -556,6 +555,55 @@ function extendWeaponHandle(
     }
     m.setVerticesData(VertexBuffer.PositionKind, newPositions, true)
     m.refreshBoundingInfo()
+  }
+}
+
+// Load a knight GLB just to extract its rest pose (per-bone local
+// rotation + position), then dispose the loaded scene graph. Used to
+// retarget anchors/poses from an older asset to the current rig — the
+// stored values are author-intent expressed in the old rig's rest
+// frame, so we need both rest poses to compute the bone deltas.
+//
+// Returns `null` if the file can't be loaded (e.g. post-retarget the
+// backup file has been deleted).
+export async function loadLegacyRestPose(
+  scene: Scene,
+  filename: string,
+): Promise<EditorSceneApi['legacyRestPose']> {
+  try {
+    const r = await SceneLoader.ImportMeshAsync('', '/models/', filename, scene)
+    const skeleton = r.skeletons[0]
+    if (!skeleton) {
+      r.meshes.forEach((m) => m.dispose())
+      console.warn(`[editor] legacy '${filename}' loaded but no skeleton found`)
+      return null
+    }
+    const rotations: Record<string, [number, number, number, number]> = {}
+    const positions: Record<string, [number, number, number]> = {}
+    // Force world matrix so linked TransformNodes have fresh local
+    // transforms before we read.
+    const root = r.meshes.find((m) => m.name === '__root__') ?? r.meshes[0]
+    root.computeWorldMatrix(true)
+    for (const bone of skeleton.bones) {
+      const node = bone._linkedTransformNode
+      if (!node) continue
+      node.rotationQuaternion = node.rotationQuaternion ?? node.rotation.toQuaternion()
+      const q = node.rotationQuaternion
+      rotations[bone.name] = [q.x, q.y, q.z, q.w]
+      if (POSITION_BONES.includes(bone.name)) {
+        const p = node.position
+        positions[bone.name] = [p.x, p.y, p.z]
+      }
+    }
+    // Tear down the scene graph — we only needed the rest data.
+    r.skeletons.forEach((s) => s.dispose())
+    r.meshes.forEach((m) => m.dispose())
+    r.animationGroups.forEach((g) => g.dispose())
+    console.log(`[editor] legacy rest pose '${filename}' captured (${Object.keys(rotations).length} bones)`)
+    return { rotations, positions }
+  } catch (err) {
+    console.log(`[editor] legacy '${filename}' not present — skipping retarget (this is fine after a one-time retarget)`)
+    return null
   }
 }
 

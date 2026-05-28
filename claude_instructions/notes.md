@@ -16,7 +16,9 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 - ✅ **Character Creator tab** (right panel, third tab alongside Bones + Style) — only operational when active model is Custom (idx 2). **Clone-only** (May 26): body bones (skinned extraction via `getAbsoluteInverseBindMatrix()` + `attachToBone()`) and props (sword + shield + future). Multi-primitive props auto-grouped into one TransformNode so a 4-piece sword rotates as one. Procedural primitives (sphere/box/cylinder/capsule) dropped from the Add UI but legacy parts still render. **Body / Armor split (May 27)** — `meshFilter` on `CreatorPart` clamps skinned extraction to specific source-mesh stems. `BODY_MESH_STEMS = [Body, Hair, Shirt, Pants, Shoes]` for the soft layer; `ARMOR_MESH_STEMS = [Helmet, Platebody, Platelegs]` for the metal layer. Add-target dropdown is 3-level nested: **Body › region › bone**, **Armor › region › bone**, **Weapons › Sword/Shield/Other**, **Weapons (library) › Axe**. Per-part accordion: header is chevron + bone dropdown + delete (the section header carries category context, no more redundant "shape" label in the card). Parts list is itself sectioned to mirror the dropdown taxonomy (Body / Armor / Weapons). Persists to library.json (`groupMeshNames`, `sourceMeshName`, `meshFilter` ride through). Button says "+ Add" (was "+ Add clone" — they're components, not clones).
 - ✅ **Weapon library (May 27)** — extra GLBs from `public/models/weapons/` loaded async at editor scene init via `loadWeaponLibrary()`. Each `WEAPON_CATALOGUE` entry has `targetMaxDim` (m) — geometry is auto-normalised via local-vertex × scale-factor multiply + `setVerticesData(..., updatable=true)`. Optional **`handleExtensionM`** (m) stretches only the handle (lower portion, head stays native via linear falloff). Optional **`gripAtBottom`** shifts the mesh origin to the handle tip so the knight grips the END of the pole, not the middle. Surfaced in Creator dropdown as `Weapons (library)` category. `attachWeaponToHand(scene, lib, stem, glbMeshes, skeleton, bone, rotDeg)` makes a weapon the primary equipment on any knight — hides existing bone-parented meshes, clones the source material (so PBR textures + albedoTextures + normal maps carry through), parents to the bone's linkedTransformNode with parent-scale-normalised user transform. Current axe: total ≈ 0.86m, grip at handle tip, rotation `(90, 90, 30)` deg on Model 1 + hero's Hand Hold.R.
 - ✅ **Multi-model spawn ergonomics (May 26)** — `+` button on the Models section header spawns a fresh visible knight 1.5m to the right of the rightmost model. `👁`/`🚫` toggle on each model row hides/shows in-place (no edit modal). `🎯` button focuses the editor camera on that model — highlights orange when that's the currently-focused model. BODY POSITION (world) is now editable — typing X/Y/Z updates both `model.position` (spawn anchor) and `model.root.position`, so each model can spawn anywhere. Reset goes back to the edited spawn position.
-- ✅ **Sync Play (May 27)** — per-model anim selection via `syncAnims: string[]` (indexed by model idx). Each model row in the SyncPlay UI binds to its own slot, so Custom no longer shares state with Model 2. `▶ Play all` fires every model that has an anim selected.
+- ✅ **Sync Play (May 28)** — sequenced multi-step session. **Opt-in models** via `+ add model ▼` chip dropdown (column-layout). **Steps** with per-model anim grid; step duration = max anim length (shorter anims pad with end pose); next step starts at cumulative offset. Per-step `×` delete + global Clear button. `▶ Play all steps`. State is React-only (ephemeral).
+- ✅ **Mirror L↔R (May 27-28)** — `↔` button on every non-system Pose, Anchor, and Animation row in the left dashboard. **Delta-based mirror** math (not naive quat flip — the rig has asymmetric rest pose, so naive mirror produces garbage): `delta_R = inv(rest_R) ⊗ pose_R; pose_L = rest_L ⊗ mirror(delta_R)` plus `.L↔.R` bone-name swap. Position mirror negates `x`. Per-keyframe `displacement` negates `x`. Anim mirror clones referenced anchors with new IDs.
+- ✅ **Knight v3 swap + v1→v3 retarget (May 28)** — `knight.glb` is now sister's fixed-export with proper PBR colours. matCache override now skips PBR (`m.material.getClassName() !== 'StandardMaterial'`) so v3 textures + colours pass through. Hero + Model 1 keep stock sword (axe removed; weapon library still loaded for Creator). **One-time retarget pipeline** transforms saved anchors/poses from v1's rest frame to v3's so existing anims still play correctly: `loadLegacyRestPose(scene, 'knight_v1_backup.glb')` extracts v1 rest, `EditorPanel` hydration applies delta-math retarget, writes `schemaVersion: 2` to library.json ONLY after successful retarget (anti-poison guard via `libraryRetargeted` React state).
 - ✅ **Per-model Style tab (May 27)** — each model owns its own `matCache: Map<slot, StandardMaterial>` (per-instance, not shared). `getEditorMaterials` / `setEditorMaterialColor` / `resetEditorMaterials` route through `active().matCache` — recolouring one knight no longer affects others. Baseline colour for Reset is stashed on `material.metadata.baselineHex` per material instance. Style tab re-fetches swatches when the active model changes.
 - ✅ **Two reset buttons** in right panel — Reset current model / Reset all models.
 - ✅ **Inverse Kinematics on 5 bones** — 2-bone analytical IK shared across paths. **Hips** → both legs adapt so feet stay planted (crouch / lean / weight shift). **Hand.L / Hand.R** → arm IK reaches new hand world position (sword placement, reaches). **Foot.L / Foot.R** → leg IK reaches new foot world position (kick prep, lifting steps). All five share the same solver; pole hints differ. See "IK system" section below for the Babylon gotchas — lots of them.
@@ -704,6 +706,92 @@ Combat state will live in React (App.tsx will own `playerHP`, `opponentHP`, `inc
 - WASD free-roam locomotion in FP mode — input-driven `root.position` translation + walk-cycle anim on top (decoupled from the per-keyframe-displacement system, which is for discrete moves)
 - Mouse-look for hero in Locked camera (currently click-drag)
 - Production-safe persistence (current `/api/animations` is dev-only Vite middleware)
+
+## Knight v3 swap + v1→v3 retarget (May 28)
+
+### Asset swap
+
+- `public/models/knight.glb` is now sister's `fixed-export` re-export of the RPG knight (19 meshes vs old 23, missing polygons fixed, proper PBR with hand-painted dark-blue armor + red shield + bronze cross). Original asset preserved as `public/models/knight_v1_backup.glb` for the one-time retarget pass; can be deleted after the retarget is verified.
+- **matCache override now PBR-aware**: `loadKnightInstance` (editor-scene), `createHero`, and `createOpponent` all skip the matCache override when `m.material.getClassName() !== 'StandardMaterial'` — keeps the v3 GLB's PBR materials + textures. StandardMaterial slots (legacy flat-shaded path) still get the hand-picked `MAT_COLORS` palette.
+- **Hero + Model 1 keep the stock sword** — `attachWeaponToHand('axe_textured', ...)` removed from both. Weapon library still loaded so the Creator's `Weapons (library)` category works on Custom. Re-enable in-place if axe-as-primary returns.
+- Bone count went 37 → 36 (one bone trimmed in v3); no code changes needed since all bone lookups are by name and ACTIVE_BONES only references the 19 combat-relevant ones.
+
+### One-time retarget pipeline
+
+The v3 rig has a DIFFERENT rest pose than v1 (Hips position `y=0.82` vs `y=0.0008`; rotations also differ). Saved anchors/poses store ABSOLUTE local rotations + Hips positions authored against v1's rest, so directly playing them on v3 caused the hero to sink under the ground + bones to twist wrong. Solution: one-time pre-load pass that transforms every saved value to v3-equivalent absolute coords.
+
+**`loadLegacyRestPose(scene, 'knight_v1_backup.glb')`** in `editor-scene.ts` — loads the backup GLB just to extract its rest rotations + positions (per-bone), then disposes the loaded scene graph. Returns null if file missing (post-retarget cleanup). Result is exposed on `EditorSceneApi.legacyRestPose` and via `__editor.getLegacyRestPose()`.
+
+**`getInitialAnchor()`** extended to also return `positions` (was rotations-only). The retarget pass needs BOTH rotations and positions for each rig's rest.
+
+**Retarget math** (per anchor / pose, in `EditorPanel.tsx` hydration):
+```ts
+// Rotation: same delta-from-rest, re-expressed in v3's rest frame
+delta = inv(restV1[bone]) ⊗ savedRotation[bone]
+newRotation[bone] = restV3[bone] ⊗ delta
+
+// Position: same delta from rest, anchored to v3's rest origin
+newPosition[bone] = restV3.pos[bone] + (savedPosition[bone] - restV1.pos[bone])
+```
+
+For bones present in v1 but missing in v3 (or vice versa): fall through, write the original value (warn in console).
+
+**Hydration flow**:
+1. Fetch `/api/animations`.
+2. If `data.schemaVersion !== 2` (needs retarget), wait for `__editor.getLegacyRestPose && getInitialAnchor()` to become ready (poll 200ms, 15s timeout — engine init is async).
+3. Apply retarget to every pose + anchor; set state.
+4. Save effect fires 500ms later and writes `schemaVersion: 2` IF retarget actually ran.
+
+**Critical anti-poison guard**: `libraryRetargeted` state. The save effect only writes `schemaVersion: 2` when this flag is true — set true ONLY when (a) loaded data already had the marker OR (b) we just successfully ran the retarget. A skipped retarget (legacy GLB missing, editor not ready in time) loads the data as-is WITHOUT writing the marker — next load with the GLB back will retry. Without this guard, the first imperfect load would poison `library.json` with `schemaVersion: 2` on unretargeted data, and subsequent loads would skip retarget forever, leaving the rig sinking permanently.
+
+### Sync Play — sequenced steps + opt-in models (May 27 evening)
+
+Earlier session's per-model-anim-slot UI replaced with **synchronized step sequencing**:
+
+- **Opt-in model chips**: section starts empty. Pick from a `+ add model` dropdown (column-layout, label / chips / dropdown each on its own line, always visible regardless of chip presence). Removing a model also drops it from every step's anim map.
+- **Steps**: `Step 1 / Step 2 / …`, each with one anim selector per opted-in model. `+ Add step` appends. `×` on a step deletes it.
+- **▶ Play all steps**: schedules each step's anims via `setTimeout(start, cumulativeMs)`. Per-step duration = max anim length in that step (shorter-anim models hold their end pose while the longest finishes). Next step starts at `cumulativeMs += stepDur`.
+- **Clear** button (full-width ghost, only visible when there's anything to clear) drops models + steps.
+- **No persistence**: sessions are React-state ephemeral.
+
+State shape: `syncModels: number[]` + `syncSteps: Array<{ id: string; anims: Record<modelIdx, animId> }>`.
+
+### Mirror buttons on Pose / Anchor / Animation rows
+
+- ↔ button on every non-system row (poses, anchors, animations) in the left dashboard.
+- Uses **delta-based mirror** (not naive `(x, -y, -z, w)` on absolute rotations) because the knight rig has an asymmetric rest pose (artist baked in stance offsets: weight-shift, foot rotation, etc — `Upper Leg.L` vs `mirror(Upper Leg.R)` diverges by up to 1.9 in quat components).
+
+Math:
+```ts
+delta_R   = inv(rest_R) ⊗ pose_R              // R's delta away from its rest
+mirror_d  = (x, -y, -z, w) of delta_R         // reflect across YZ-plane (sagittal)
+pose_L    = rest_L ⊗ mirror_d                 // apply on L's rest
+```
+
+Plus bone-name swap `.L ↔ .R`. Midline bones (Hips/Spine/Chest/Neck/Head) handled naturally — source rest == target rest so the formula collapses to in-place mirror. Position mirror just negates `x`. Per-keyframe `displacement` negates `x`.
+
+**Shared helpers** in `EditorPanel.tsx`:
+- `getRestRotations()` — pulls active model's rest from `__editor.getInitialAnchor().rotations`.
+- `newMirrorId(prefix)` — UUID with fallback.
+- `mirrorBoneName`, `qInv`, `qMul`, `mirrorRotations(r, rest)`, `mirrorPositions(p)`, `mirrorDisplacement(d)`.
+
+**Anim mirror** (`onMirrorAnimation`) also handles the indirection: clones each non-system referenced anchor with mirrored data, builds new keyframes referencing the new anchors, mirrored per-keyframe displacement. System anchors (Initial Position — bilaterally symmetric rest) pass through reference unchanged. `heroKey/oppKey` deliberately NOT carried over (avoid key collision with original).
+
+## Lessons captured (knight swap + retarget + sync sequencing session, 2026-05-28)
+
+G1. **Asset swap is more than a file rename.** Even when sister "only" fixed clipping polygons, the v3 rest pose was DIFFERENT enough (Hips `y=0.82` vs `y=0.0008`) to break every saved Hips position in the existing animation library. Saved animations store ABSOLUTE local rotations + positions authored against the OLD rig's rest. Lesson: any rig swap needs a retarget pipeline OR a redo of the anim library. The retarget math (delta from rest, re-expressed on new rest) is mechanical: `delta = inv(restOld) ⊗ saved; new = restNew ⊗ delta`. ~30 LOC including position math.
+
+G2. **One-time-marker design needs a "did the work actually happen?" guard.** First version of the retarget wrote `schemaVersion: 2` on every save after hydration — but if the retarget was skipped (engine async-init not ready in 15s, legacy GLB missing, etc), the save still wrote `2` on un-retargeted data. Subsequent loads saw the marker and skipped retarget forever, locking the file in a broken state. Fix: only write the marker when (a) it was already there on load OR (b) the retarget pass actually ran successfully (tracked via `libraryRetargeted` React state). Generalises: any "this data has been migrated" marker must be set ONLY by the migration code, never as a default on first save.
+
+G3. **PBR vs StandardMaterial branching in matCache override.** v3 ships PBR with hand-painted textures; v1 shipped StandardMaterial with named-only slots. Single guard line `if (m.material.getClassName?.() !== 'StandardMaterial') continue` in three matCache loops (editor-scene's loadKnightInstance + hero.ts + opponent.ts) keeps PBR alone and preserves legacy flat-color path. Same Style tab API works for both (`applyColor` is any-typed: writes `diffuseColor` if present, falls back to `albedoColor` for PBR — already shipped earlier for textured prop clones).
+
+G4. **Sync Play step-sequencing > model-sequencing for combat practice.** Earlier UI had one anim slot per model; user wanted "step 1: both swing simultaneously, step 2: both block simultaneously" not "model 1 plays its sequence in isolation while model 2 plays its sequence in isolation". Re-architected to step-first hierarchy: `Steps × Models grid`. Per-step duration = max anim length so shorter anims pad with their end pose. Cumulative timing via setTimeout chain. Scales naturally to opt-in N models — no fixed 2-model assumption.
+
+G5. **Opt-in chip lists for sessions of variable size.** Models list grows from `+ Add Model` button — sync sessions opt them in via `+ add model ▼` dropdown filtered to non-already-included entries. Removing also cleans every reference (each step's anim map drops the removed idx). Column-layout (label / chips / dropdown each own row) keeps the `+ add` button findable whether or not chips exist — avoids the "where's the add button when nothing's added?" UX trap.
+
+G6. **Asymmetric rest pose breaks naive quat mirror.** `(x, -y, -z, w)` on absolute rotations only works when the rig's bone-local frames are themselves symmetric across the sagittal plane. Knight rigs from glTF export typically have stance asymmetries baked in (weight-shift, foot turn). Verified via Playwright probe: `Upper Leg.L` vs `mirror(Upper Leg.R)` differed by 1.9 in quat components. Delta-based mirror (mirror the rotation away from rest, then apply to the OTHER side's rest) handles arbitrary asymmetric rigs correctly. Same math pattern applies to retargeting between two different rigs (delta from rest is the canonical "intent" representation).
+
+G7. **Mirror buttons on poses + anchors, not just animations.** Author one asymmetric stance, click ↔, you've got the opposite-side counterpart immediately for the other half of any sparring practice. Combined with anim-level mirror, halves the authoring effort for combat moves (one strike + click → both sides). Cost: one shared `getRestRotations()` helper + 30 LOC of common mirror math reused across three handlers.
 
 ## Lessons captured (weapon polish + native-GLB A/B session, 2026-05-27 evening)
 
