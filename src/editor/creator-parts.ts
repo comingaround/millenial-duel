@@ -2,6 +2,7 @@ import {
   AbstractMesh,
   Bone,
   Color3,
+  Matrix,
   Mesh,
   MeshBuilder,
   Scene,
@@ -36,6 +37,12 @@ export const DEFAULT_PART_DEFAULTS: Record<CreatorShape, {
 }
 
 const DEFAULT_COLOR_PRIMITIVE = '#8a8d92'  // neutral grey
+
+// One-shot diagnostic log gate: bone names we've already logged this session.
+// Confirms whether v3's source meshes have non-identity rest world transforms
+// (the hypothesis behind the v1→v3 Creator-distortion fix). One line per bone
+// keeps the console readable.
+const LOGGED_EXTRACT_BONES = new Set<string>()
 // Sentinel — clones leave color empty so create funcs can fill it from
 // the source material's actual diffuse/albedo. If sampling fails, falls
 // back to DEFAULT_COLOR_PRIMITIVE.
@@ -561,10 +568,32 @@ function extractBoneGeometry(
     }
     const boneIdx = m.skeleton.bones.findIndex((b) => b.name === boneName)
     if (boneIdx < 0) continue
-    const bone = m.skeleton.bones[boneIdx]
-    // Per-mesh inverse bind matrix — each skin in a multi-skin GLB may
-    // have its own inverseBindMatrices that subtly differ.
-    const invBind = bone.getAbsoluteInverseBindMatrix()
+    // Compose mesh-local → bone-local from REST world matrices captured at
+    // load. The previous path used bone.getAbsoluteInverseBindMatrix(), which
+    // assumes vertices are already in world space — only true when the source
+    // mesh has identity world transform (v1's Blender export with "Apply
+    // Transforms"). v3's GLB has non-identity mesh transforms baked into the
+    // scene graph (Armature scaling, root-node matrices) — the bind path
+    // produced distorted geometry there. Composing meshWorld ⊗ boneWorld⁻¹
+    // is correct for ANY mesh local transform and reduces to the bind-path
+    // when meshWorld is identity (v1 backward-compat).
+    const meshWorldMat = source.restMeshWorldMatrices.get(m.uniqueId)
+    const boneWorldMat = source.restBoneWorldMatrices.get(boneName)
+    if (!meshWorldMat || !boneWorldMat) {
+      console.warn(`[creator] missing rest world matrix for mesh '${m.name}' or bone '${boneName}' — skipped`)
+      continue
+    }
+    const meshToBoneLocal = meshWorldMat.multiply(Matrix.Invert(boneWorldMat))
+
+    if (!LOGGED_EXTRACT_BONES.has(boneName)) {
+      LOGGED_EXTRACT_BONES.add(boneName)
+      const t = new Vector3(), s = new Vector3()
+      meshWorldMat.decompose(s, undefined, t)
+      const bt = boneWorldMat.getTranslation()
+      console.log(
+        `[creator] extract '${boneName}' from mesh '${m.name}': meshWorld translate=${t.asArray().map((n) => n.toFixed(3)).join(',')} scale=${s.asArray().map((n) => n.toFixed(3)).join(',')}; boneWorld translate=${bt.asArray().map((n) => n.toFixed(3)).join(',')}`,
+      )
+    }
 
     const positions = m.getVerticesData(VertexBuffer.PositionKind)
     const normalsSrc = m.getVerticesData(VertexBuffer.NormalKind)
@@ -610,14 +639,16 @@ function extractBoneGeometry(
         let ni = localMap.get(oi)
         if (ni === undefined) {
           v.copyFromFloats(positions[oi * 3], positions[oi * 3 + 1], positions[oi * 3 + 2])
-          const vt = Vector3.TransformCoordinates(v, invBind)
+          const vt = Vector3.TransformCoordinates(v, meshToBoneLocal)
           ni = nextIdx++
           localMap.set(oi, ni)
           outPositions.push(vt.x, vt.y, vt.z)
           if (normalsSrc) {
             n.copyFromFloats(normalsSrc[oi * 3], normalsSrc[oi * 3 + 1], normalsSrc[oi * 3 + 2])
             // TransformNormal ignores translation — correct for direction vectors.
-            const nt = Vector3.TransformNormal(n, invBind)
+            // Honors rotation + scale of meshToBoneLocal; uniform-scale rigs keep
+            // normals valid after subsequent re-normalize.
+            const nt = Vector3.TransformNormal(n, meshToBoneLocal)
             nt.normalize()
             outNormals.push(nt.x, nt.y, nt.z)
           }
