@@ -136,13 +136,28 @@ export default function BoneControls() {
     setMaterials((curr) => curr.map((m) => (m.name === matName ? { ...m, hex } : m)))
   }
 
-  const onResetMaterials = () => {
+  const refreshMaterialsFromEngine = () => {
     const ed = (window as any).__editor
-    ed?.resetEditorMaterials?.()
-    // Re-read so the swatches sync to the restored colors.
     const mats: EditorMaterial[] = ed?.getEditorMaterials?.() ?? []
     mats.sort((a, b) => a.name.localeCompare(b.name))
     setMaterials(mats)
+  }
+  const onSaveMaterials = () => {
+    const ed = (window as any).__editor
+    ed?.saveActiveEditorMaterials?.()
+    // Saved snapshot now matches live — no visual refresh needed, but
+    // re-pull defensively in case any rounding happened during snapshot.
+    refreshMaterialsFromEngine()
+  }
+  const onRevertMaterials = () => {
+    const ed = (window as any).__editor
+    ed?.revertActiveEditorMaterials?.()
+    refreshMaterialsFromEngine()
+  }
+  const onResetMaterials = () => {
+    const ed = (window as any).__editor
+    ed?.resetEditorMaterials?.()
+    refreshMaterialsFromEngine()
   }
 
   const hasPositionControl =
@@ -220,9 +235,29 @@ export default function BoneControls() {
               </label>
             ))}
           </div>
-          <button style={resetBtnStyle} onClick={onResetMaterials}>
-            Reset to default colors
-          </button>
+          <div style={styleBtnRowStyle}>
+            <button
+              style={styleBtnStyle}
+              onClick={onSaveMaterials}
+              title="Persist current colours to library.json"
+            >
+              Save
+            </button>
+            <button
+              style={styleBtnStyle}
+              onClick={onRevertMaterials}
+              title="Restore the last saved colours for this model"
+            >
+              Revert
+            </button>
+            <button
+              style={styleBtnStyle}
+              onClick={onResetMaterials}
+              title="Restore the baked-in GLB colours (factory defaults)"
+            >
+              Reset
+            </button>
+          </div>
         </div>
       ) : (
       <>
@@ -1117,6 +1152,27 @@ const resetBtnStyle: CSSProperties = {
   background: 'rgba(200, 90, 90, 0.22)',
   color: '#fff',
   border: '1px solid rgba(220, 110, 110, 0.5)',
+  borderRadius: 4,
+  cursor: 'pointer',
+  fontSize: 12,
+  fontFamily: 'inherit',
+  fontWeight: 600,
+  letterSpacing: 0.3,
+}
+
+// Style-tab Save/Revert/Reset trio — sit side-by-side under the
+// material list, equal width.
+const styleBtnRowStyle: CSSProperties = {
+  display: 'flex',
+  gap: 6,
+  marginTop: 8,
+}
+const styleBtnStyle: CSSProperties = {
+  flex: 1,
+  padding: '10px 4px',
+  background: 'rgba(80, 100, 120, 0.25)',
+  color: '#fff',
+  border: '1px solid rgba(130, 150, 180, 0.5)',
   borderRadius: 4,
   cursor: 'pointer',
   fontSize: 12,

@@ -2,7 +2,9 @@ import '@babylonjs/loaders/glTF'
 import {
   AbstractMesh,
   Color3,
+  Material,
   Mesh,
+  PBRMaterial,
   Scene,
   SceneLoader,
   Skeleton,
@@ -131,8 +133,10 @@ export type ModelInstance = {
   // Per-instance material cache keyed by GLB material-slot name
   // (Skin / Metal / Blade / etc). Used by the Style tab — each model
   // has independent colours so recolouring Model 2 doesn't affect
-  // Model 1 or Custom.
-  matCache: Map<string, StandardMaterial>
+  // Model 1 or Custom. Holds either StandardMaterial (legacy flat-shaded
+  // assets) or PBRMaterial clones (v3 knight) — the Style APIs dispatch
+  // by class.
+  matCache: Map<string, Material>
   restPose: Record<string, [number, number, number, number]>
   restPositions: Record<string, [number, number, number]>
   restWorldPositions: Record<string, [number, number, number]>
@@ -187,31 +191,43 @@ async function loadKnightInstance(
   root.scaling = root.scaling.scale(1.2)
   root.rotation = new Vector3(0, yRotation, 0)
 
-  // Per-instance material cache — each model owns its own StandardMaterial
-  // for each GLB slot (Skin / Metal / Blade / …). The Style tab edits these
-  // so recolouring is independent per model. Baseline colour is stashed on
-  // material.metadata for the Reset path.
-  // PBR materials from the GLB are KEPT AS-IS (preserves the v3 native
-  // export's textures + colours). Only StandardMaterial slots get overridden
-  // with the hand-picked MAT_COLORS palette — kept for backward-compat
-  // with the older flat-shaded knight asset.
-  const matCache = new Map<string, StandardMaterial>()
+  // Per-instance material cache — each model owns its own material
+  // instance for each GLB slot (Skin / Metal / Blade / …). The Style
+  // tab edits these so recolouring is independent per model. Baseline
+  // colour is stashed on material.metadata for the Reset path.
+  //
+  // Two paths by source-material class:
+  //   - StandardMaterial (legacy flat-shaded asset): replace with a
+  //     hand-picked MAT_COLORS palette entry.
+  //   - PBRMaterial (v3 knight): clone the source material per instance
+  //     so textures + PBR settings carry over but recolouring one model
+  //     doesn't bleed into the others. Style writes to `albedoColor`.
+  const matCache = new Map<string, Material>()
   for (const m of result.meshes) {
     m.isPickable = false
     if (!(m instanceof Mesh) || m.getTotalVertices() === 0) continue
     if (!m.material) continue
-    // Skip PBR materials — they ship from the artist with the right look.
-    if (m.material.getClassName?.() !== 'StandardMaterial') continue
     const matName = m.material.name
     let mat = matCache.get(matName)
     if (!mat) {
-      const baseline = MAT_COLORS[matName] ?? FALLBACK
-      mat = new StandardMaterial(`editor_${name}_${matName}`, scene)
-      mat.diffuseColor = baseline.clone()
-      mat.specularColor = new Color3(0.10, 0.10, 0.12)
-      mat.ambientColor = baseline.scale(0.5)
-      mat.backFaceCulling = false
-      mat.metadata = { baselineHex: baseline.toHexString() }
+      if (m.material instanceof StandardMaterial) {
+        const baseline = MAT_COLORS[matName] ?? FALLBACK
+        const std = new StandardMaterial(`editor_${name}_${matName}`, scene)
+        std.diffuseColor = baseline.clone()
+        std.specularColor = new Color3(0.10, 0.10, 0.12)
+        std.ambientColor = baseline.scale(0.5)
+        std.backFaceCulling = false
+        std.metadata = { baselineHex: baseline.toHexString() }
+        mat = std
+      } else if (m.material instanceof PBRMaterial) {
+        const src = m.material
+        const clone = src.clone(`editor_${name}_${matName}`)
+        const baselineHex = src.albedoColor?.toHexString?.() ?? '#888888'
+        clone.metadata = { ...(src.metadata ?? {}), baselineHex }
+        mat = clone
+      } else {
+        continue
+      }
       matCache.set(matName, mat)
     }
     m.material = mat
@@ -684,14 +700,25 @@ export function attachWeaponToHand(
     rotationDeg[1] * DEG,
     rotationDeg[2] * DEG,
   )
+  // Force the new group + its children's world matrices to recompute
+  // immediately so the weapon shows on the same frame it's attached.
+  // Without this, the mesh exists in the scene but doesn't render until
+  // a later frame triggers `computeWorldMatrix` from the parent chain.
+  groupRoot.computeWorldMatrix(true)
+  for (const child of groupRoot.getChildMeshes(true)) {
+    child.computeWorldMatrix(true)
+  }
   return groupRoot
 }
 
-// Flip `isVisible` on every Mesh on `model` whose name stem matches
-// `stem` (Babylon's GLB loader names multi-primitive meshes
-// "<stem>_primitive<N>"). Used by the Custom slot toggles — making a
-// slot off hides all primitives of that piece, making it on shows
-// them all. No-op for meshes that don't match.
+// Flip BOTH `isVisible` and `setEnabled` on every Mesh on `model` whose
+// name stem matches `stem` (Babylon's GLB loader names multi-primitive
+// meshes "<stem>_primitive<N>"). Used by the Custom slot toggles —
+// making a slot off hides all primitives of that piece, making it on
+// shows them all. Dual-flagging is required because `attachWeaponToHand`
+// uses `setEnabled(false)` to disable the native sword/shield when a
+// library weapon is attached — going back to the native must re-enable
+// it, not just unhide it.
 export function setCustomMeshVisibleByStem(
   model: ModelInstance,
   stem: string,
@@ -703,6 +730,7 @@ export function setCustomMeshVisibleByStem(
     const meshStem = m.name.split('_primitive')[0]
     if (meshStem === stem) {
       m.isVisible = visible
+      m.setEnabled(visible)
     }
   }
 }

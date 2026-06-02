@@ -3,9 +3,11 @@ import {
   Color3,
   Color4,
   Engine,
+  PBRMaterial,
   Quaternion,
   Scene,
   Space,
+  StandardMaterial,
   UniversalCamera,
   Vector3,
 } from '@babylonjs/core'
@@ -295,6 +297,18 @@ export function createEngine(
     const bumpCustomSlots = () => {
       customSlotsRev++
       for (const l of customSlotsListeners) l()
+    }
+    // Editor-materials save snapshot — the "saved" state the Revert
+    // button restores to. Lives on the engine; the EditorPanel mirrors
+    // it into React state via a listener so the auto-save loop only
+    // writes to disk when this changes (live colour drags do NOT
+    // mutate it).
+    let savedEditorMaterials: Record<string, Record<string, string>> = {}
+    let editorMaterialsRev = 0
+    const editorMaterialsListeners: Array<() => void> = []
+    const bumpEditorMaterials = () => {
+      editorMaterialsRev++
+      for (const l of editorMaterialsListeners) l()
     }
 
     // Apply one Custom slot change. body/helmet/bodyArmor/legArmor toggle
@@ -861,22 +875,33 @@ export function createEngine(
       setBonePickerActive: (a: boolean) => bonePicker?.setActive(a),
       // Per-model material APIs — read/write the ACTIVE model's
       // matCache only, so recolouring one knight doesn't bleed into
-      // the others.
+      // the others. Dispatch by material class: StandardMaterial uses
+      // diffuse+ambient (legacy flat-shaded path), PBRMaterial uses
+      // albedoColor (v3 knight path, preserves textures).
       getEditorMaterials: () => {
         const m = active()
         if (!m?.matCache) return []
-        return Array.from(m.matCache.entries()).map(([slot, mat]) => ({
-          name: slot,
-          hex: mat.diffuseColor?.toHexString?.() ?? '#888888',
-        }))
+        return Array.from(m.matCache.entries()).map(([slot, mat]) => {
+          let hex = '#888888'
+          if (mat instanceof StandardMaterial) {
+            hex = mat.diffuseColor?.toHexString?.() ?? hex
+          } else if (mat instanceof PBRMaterial) {
+            hex = mat.albedoColor?.toHexString?.() ?? hex
+          }
+          return { name: slot, hex }
+        })
       },
       setEditorMaterialColor: (matName: string, hex: string) => {
         const m = active()
         const mat = m?.matCache?.get(matName)
         if (!mat) return
         const c = Color3.FromHexString(hex)
-        mat.diffuseColor = c
-        mat.ambientColor = c.scale(0.5)
+        if (mat instanceof StandardMaterial) {
+          mat.diffuseColor = c
+          mat.ambientColor = c.scale(0.5)
+        } else if (mat instanceof PBRMaterial) {
+          mat.albedoColor = c
+        }
       },
       resetEditorMaterials: () => {
         const m = active()
@@ -885,10 +910,100 @@ export function createEngine(
           const hex = (mat.metadata as any)?.baselineHex
           if (!hex) continue
           const c = Color3.FromHexString(hex)
-          mat.diffuseColor = c
-          mat.ambientColor = c.scale(0.5)
+          if (mat instanceof StandardMaterial) {
+            mat.diffuseColor = c
+            mat.ambientColor = c.scale(0.5)
+          } else if (mat instanceof PBRMaterial) {
+            mat.albedoColor = c
+          }
         }
       },
+      // Save/Revert support — Save writes a snapshot of every model's
+      // current matCache colours, keyed by model name; Revert / hydration
+      // applies a stored snapshot back across all instances.
+      snapshotAllEditorMaterials: () => {
+        const out: Record<string, Record<string, string>> = {}
+        for (const m of ed.models) {
+          if (!m.matCache) continue
+          const entry: Record<string, string> = {}
+          for (const [slot, mat] of m.matCache.entries()) {
+            if (mat instanceof StandardMaterial) {
+              entry[slot] = mat.diffuseColor?.toHexString?.() ?? '#888888'
+            } else if (mat instanceof PBRMaterial) {
+              entry[slot] = mat.albedoColor?.toHexString?.() ?? '#888888'
+            }
+          }
+          out[m.name] = entry
+        }
+        return out
+      },
+      applyEditorMaterials: (snapshot: Record<string, Record<string, string>>) => {
+        if (!snapshot) return
+        for (const m of ed.models) {
+          const entry = snapshot[m.name]
+          if (!entry || !m.matCache) continue
+          for (const [slot, hex] of Object.entries(entry)) {
+            const mat = m.matCache.get(slot)
+            if (!mat) continue
+            const c = Color3.FromHexString(hex)
+            if (mat instanceof StandardMaterial) {
+              mat.diffuseColor = c
+              mat.ambientColor = c.scale(0.5)
+            } else if (mat instanceof PBRMaterial) {
+              mat.albedoColor = c
+            }
+          }
+        }
+      },
+      // Save / Revert buttons — Save snapshots the ACTIVE model's live
+      // colours into the saved-snapshot map (keyed by model name).
+      // Revert applies the saved entry back to that model's matCache.
+      // Both fire a listener so EditorPanel can mirror state + persist.
+      saveActiveEditorMaterials: () => {
+        const m = active()
+        if (!m?.matCache) return
+        const entry: Record<string, string> = {}
+        for (const [slot, mat] of m.matCache.entries()) {
+          if (mat instanceof StandardMaterial) {
+            entry[slot] = mat.diffuseColor?.toHexString?.() ?? '#888888'
+          } else if (mat instanceof PBRMaterial) {
+            entry[slot] = mat.albedoColor?.toHexString?.() ?? '#888888'
+          }
+        }
+        savedEditorMaterials = { ...savedEditorMaterials, [m.name]: entry }
+        bumpEditorMaterials()
+      },
+      revertActiveEditorMaterials: () => {
+        const m = active()
+        if (!m?.matCache) return
+        const entry = savedEditorMaterials[m.name]
+        if (!entry) return
+        for (const [slot, hex] of Object.entries(entry)) {
+          const mat = m.matCache.get(slot)
+          if (!mat) continue
+          const c = Color3.FromHexString(hex)
+          if (mat instanceof StandardMaterial) {
+            mat.diffuseColor = c
+            mat.ambientColor = c.scale(0.5)
+          } else if (mat instanceof PBRMaterial) {
+            mat.albedoColor = c
+          }
+        }
+      },
+      getSavedEditorMaterials: () => savedEditorMaterials,
+      setSavedEditorMaterials: (snap: Record<string, Record<string, string>>) => {
+        savedEditorMaterials = snap ?? {}
+        // No bump: this is hydration only; the auto-save loop must not
+        // immediately rewrite the file we just loaded.
+      },
+      addEditorMaterialsListener: (fn: () => void) => {
+        editorMaterialsListeners.push(fn)
+        return () => {
+          const i = editorMaterialsListeners.indexOf(fn)
+          if (i >= 0) editorMaterialsListeners.splice(i, 1)
+        }
+      },
+      getEditorMaterialsRevision: () => editorMaterialsRev,
       // Diagnostic — read a bone's world position from the ACTIVE editor
       // model only (avoids hero/opp same-named-bone confusion).
       debugBoneWorld: (boneName: string) => {

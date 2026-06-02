@@ -1443,7 +1443,7 @@
     "helmet": "helmet",
     "bodyArmor": "platebody",
     "legArmor": "platelegs",
-    "rightHand": "sword",
+    "rightHand": "library:axe_textured",
     "leftHand": "shield"
   },
   "schemaVersion": 2

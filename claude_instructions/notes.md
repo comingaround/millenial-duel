@@ -13,7 +13,7 @@ First-person sword-and-shield duel game (KCD-style). Web first, mobile later via
 - ✅ Custom **pose/animation editor** at scene `(50, 0, 0)` — separate knight rig used purely as a posing puppet
 - ✅ Editor features: bone-pick (sphere click), 3-axis knob rotation, **Hips X/Y/Z TRANSLATE stepper with leg-plant IK (feet stay glued to their world positions while body shifts)**, editable typed input + scroll-wheel + ± buttons, save Pose / Save Anchor, build Animation from anchor sequence with time offsets, **Initial Position virtual pose** (top of Poses list, system, can't delete), virtual Initial Position anchor, rename poses/anchors via ✎ icon, **Edit animation = ✎ opens full builder preloaded for in-place tinker**, **animations can pick an Initial Pose** that the model snaps to before keyframes play, import baked Knight GLB animations as anchor+animation pairs, per-animation hero/opponent key bindings
 - ✅ **Three-model editor** — Model 1 + Model 2 + Custom along X axis at (50,0,0), (51.5,0,0), (53.0,0,0). Custom is skeleton-only (all GLB meshes hidden via `isVisible = false` flagged on load by `loadKnightInstance(..., hideAllMeshes=true)`) — user builds the body part-by-part via the Creator tab. Active-model selector in left dash routes all bone-control / anim-preview to the selected one. Each model row has ✎ edit (rename + visibility toggle).
-- ✅ **Character Creator tab** (right panel, third tab alongside Bones + Style) — only operational when active model is Custom (idx 2). **Clone-only** (May 26): body bones (skinned extraction via `getAbsoluteInverseBindMatrix()` + `attachToBone()`) and props (sword + shield + future). Multi-primitive props auto-grouped into one TransformNode so a 4-piece sword rotates as one. Procedural primitives (sphere/box/cylinder/capsule) dropped from the Add UI but legacy parts still render. **Body / Armor split (May 27)** — `meshFilter` on `CreatorPart` clamps skinned extraction to specific source-mesh stems. `BODY_MESH_STEMS = [Body, Hair, Shirt, Pants, Shoes]` for the soft layer; `ARMOR_MESH_STEMS = [Helmet, Platebody, Platelegs]` for the metal layer. Add-target dropdown is 3-level nested: **Body › region › bone**, **Armor › region › bone**, **Weapons › Sword/Shield/Other**, **Weapons (library) › Axe**. Per-part accordion: header is chevron + bone dropdown + delete (the section header carries category context, no more redundant "shape" label in the card). Parts list is itself sectioned to mirror the dropdown taxonomy (Body / Armor / Weapons). Persists to library.json (`groupMeshNames`, `sourceMeshName`, `meshFilter` ride through). Button says "+ Add" (was "+ Add clone" — they're components, not clones).
+- ✅ **Character Creator — slot-based wardrobe (June 2 rebuild)** — `src/editor/creator-parts.ts` was DELETED in full; the per-bone-clone Creator never recovered from the v3 knight swap (extraction returned distorted blobs, bone-index matching off-by-one, Body/armor extraction silently failed). Replaced with a **slot-based wardrobe**: Custom is a clone of the SAME v3 GLB Model 1/2 load with every mesh hidden up front; six slots flip mesh visibility (Body / Helmet / Body Armor / Leg Armor / Right Hand / Left Hand). Right + Left Hand slots also accept `library:<stem>` values that hide the native sword/shield + attach a weapon-library entry via `attachWeaponToHand`. Default kit = full set, so a fresh Custom looks identical to Model 1/2. Persists as `customSlots` block in library.json (legacy `creatorParts` field silently ignored, dropped on first save). Style tab unchanged — per-instance material cache still recolours Custom independently.
 - ✅ **Weapon library (May 27)** — extra GLBs from `public/models/weapons/` loaded async at editor scene init via `loadWeaponLibrary()`. Each `WEAPON_CATALOGUE` entry has `targetMaxDim` (m) — geometry is auto-normalised via local-vertex × scale-factor multiply + `setVerticesData(..., updatable=true)`. Optional **`handleExtensionM`** (m) stretches only the handle (lower portion, head stays native via linear falloff). Optional **`gripAtBottom`** shifts the mesh origin to the handle tip so the knight grips the END of the pole, not the middle. Surfaced in Creator dropdown as `Weapons (library)` category. `attachWeaponToHand(scene, lib, stem, glbMeshes, skeleton, bone, rotDeg)` makes a weapon the primary equipment on any knight — hides existing bone-parented meshes, clones the source material (so PBR textures + albedoTextures + normal maps carry through), parents to the bone's linkedTransformNode with parent-scale-normalised user transform. Current axe: total ≈ 0.86m, grip at handle tip, rotation `(90, 90, 30)` deg on Model 1 + hero's Hand Hold.R.
 - ✅ **Multi-model spawn ergonomics (May 26)** — `+` button on the Models section header spawns a fresh visible knight 1.5m to the right of the rightmost model. `👁`/`🚫` toggle on each model row hides/shows in-place (no edit modal). `🎯` button focuses the editor camera on that model — highlights orange when that's the currently-focused model. BODY POSITION (world) is now editable — typing X/Y/Z updates both `model.position` (spawn anchor) and `model.root.position`, so each model can spawn anywhere. Reset goes back to the edited spawn position.
 - ✅ **Sync Play (May 28)** — sequenced multi-step session. **Opt-in models** via `+ add model ▼` chip dropdown (column-layout). **Steps** with per-model anim grid; step duration = max anim length (shorter anims pad with end pose); next step starts at cumulative offset. Per-step `×` delete + global Clear button. `▶ Play all steps`. State is React-only (ephemeral).
@@ -84,13 +84,12 @@ duel-game/
 │   │       ├── opponent.ts              loads knight.glb, exposes playSlash/playBlock + playCustomAnimation
 │   │       └── hero.ts                  loads knight.glb again, head hidden for FP, exposes playCustomAnimation
 │   ├── editor/                          ← in-browser pose/animation editor
-│   │   ├── editor-scene.ts              loads 3 knight instances at x=50/51.5/53, exports ACTIVE_BONES (19), CreatorPart types
+│   │   ├── editor-scene.ts              loads 3 knight instances at x=50/51.5/53, exports ACTIVE_BONES (19), CustomSlots types + slot helpers + weapon library
 │   │   ├── bone-picker.ts               yellow spheres at active bones, click-to-select (no drag)
 │   │   ├── pose-store.ts                snapshotPose / applyPose helpers
 │   │   ├── animation-player.ts          builds Babylon Animations from anchor keyframes
-│   │   ├── creator-parts.ts             Character Creator part lifecycle (primitives + clone extraction)
-│   │   ├── BoneControls.tsx             right panel: Bones / Style / Creator tabs
-│   │   ├── EditorPanel.tsx              left dashboard: poses/anchors/animations + import modal + creator-parts persistence
+│   │   ├── BoneControls.tsx             right panel: Bones / Style / Creator tabs (Creator = 6-slot wardrobe)
+│   │   ├── EditorPanel.tsx              left dashboard: poses/anchors/animations + import modal + customSlots persistence
 │   │   └── gizmo.ts                     (legacy GizmoManager wiring, unused after drag removal)
 │   └── ui/
 │       └── CameraToggle.tsx             bottom-right Free Roam / Locked / Editor toggle
@@ -428,133 +427,71 @@ The Initial Position anchor used to be stored in state and inserted by both an a
 - `window.__editor` = `{snapshot, apply, reset, resetAll, selectBone, getSelectedBone, addBoneSelectListener, rotateSelectedBone, translateSelectedBone, getSelectedBoneEuler, getSelectedBonePosition, hasPositionControl, getBodyPosition, setBonePickerActive, getEditorMaterials, setEditorMaterialColor, resetEditorMaterials, playAnimation, playAnimationOnModel, stopAnimation, pushUndo, undo, redo, canUndo, canRedo, getInitialAnchor, listBakedAnimations, importBakedAnimation, getModels, getActiveModelIndex, setActiveModel, setModelVisible, getModelVisible, debugBoneWorld}`
 - `window.__customAnims` = resolved custom animations `{name, heroKey, oppKey, resolved: [{anchor:{rotations, positions?}, time}]}` — `positions` flows through for Hips translation playback
 
-## Character Creator (Custom model — index 2)
+## Character Creator — slot-based wardrobe (June 2 rebuild)
 
-A third knight instance is loaded as **skeleton-only** (every GLB renderable mesh is hidden via `isVisible = false`). The user builds the body up part-by-part by attaching primitives or mesh clones to bones via a `Creator` tab in the right panel. Each part is independently editable (size, offset, rotation, colour) and follows the bone through any pose change.
+The original Creator was a per-bone-clone system: pick a bone, pick a body part, extract triangles by skinning weight, attach via `mesh.attachToBone()`. It worked on v1's knight (8 separate skins, per-part meshes named `Body`/`Hair`/`Shirt`/`Helmet`/etc.). The v3 swap on May 28 broke it: distorted "yellow blobs" that didn't match any body part. Two rounds of surgical fixes (rest-world transforms, name-based bone matching) didn't restore the feature. Rebuilt as a **slot-based wardrobe** on June 2, 2026.
 
-### Two flavours of part
+### Design
 
-1. **Primitives** (`sphere`, `box`, `cylinder`, `capsule`): `MeshBuilder.Create*` at unit size, parented to the bone's `_linkedTransformNode`, scaling/position normalised by `parent.absoluteScaling` so user-entered cm values map 1:1 to world cm. (Without normalisation the GLB's baked armature scale makes "15 cm" render as metres.)
-2. **`clone` shape**: extracts the actual triangles from Model 1 that are skinned to the target bone. Vertices are baked into bone-local-skeleton-relative space via `bone.getAbsoluteInverseBindMatrix()` (the canonical Babylon skinning math), then re-attached to the Custom model's same bone via **`mesh.attachToBone(targetBone, refMesh)`** — Babylon's own API for bone-following meshes. Result: visually identical to Model 1's geometry, follows the Custom bone through any pose/animation.
+Custom (Model 3) loads the **same v3 GLB** as Model 1/2 with every renderable mesh's `isVisible` flipped to false at load. The Creator tab toggles slot meshes back on per the user's slot selections.
 
-### Why `attachToBone` instead of `mesh.parent = linkedTransformNode`
+Six slots, each picking ONE option:
 
-For PRIMITIVES, `mesh.parent = bone._linkedTransformNode` works fine — the linked TransformNode's world matrix matches the on-screen bone position. But for CLONES it doesn't: the linked TransformNode's world chain integrates Blender→glTF coordinate-conversion transforms (extreme scale + translation that net out via skinning but stay visible on naive parenting). Symptom seen during development: extracted geometry's world bounds landed at `(-945, -5733, 7289)` instead of near `(53, 1.6, 0)`. Switching to `mesh.attachToBone(bone, refMesh)` + extracting via `getAbsoluteInverseBindMatrix()` is the canonical fix.
+| Slot         | Options                                                              | Default     |
+|--------------|----------------------------------------------------------------------|-------------|
+| Body         | `none` \| `body`                                                     | `body`      |
+| Helmet       | `none` \| `helmet`                                                   | `helmet`    |
+| Body Armor   | `none` \| `platebody`                                                | `platebody` |
+| Leg Armor    | `none` \| `platelegs`                                                | `platelegs` |
+| Right Hand   | `none` \| `sword` \| `library:axe_textured` \| `library:double_edge_axe` | `sword`     |
+| Left Hand    | `none` \| `shield`                                                   | `shield`    |
 
-### Triangle ownership rule (clone extraction)
+Default kit = full equipment matching Model 1/2, so a fresh Custom looks like a "blank knight" the user can swap pieces on, not an empty skeleton.
 
-Per-vertex: assigned to a bone if **any** of its 4 skinning weights on that bone is ≥ 0.30. Per-triangle: included if **any** of its 3 vertices is assigned. Tradeoffs: looser than strict-dominance (small overlap at bone-boundary seams between neighbouring clones) but means no holes anywhere. The strict "all 3 verts must own this bone" rule produced 0 triangles for many bones (boundary verts split ~50/50 between adjacent bones → dominant winner is the neighbour).
+### Implementation
 
-### Per-part data shape (`CreatorPart`)
+- **`editor-scene.ts`** — `CustomSlots` type + `DEFAULT_CUSTOM_SLOTS` const + `SLOT_NATIVE_STEM` map (slot → mesh-name stem) + `SLOT_HAND_BONE` map (right→`Hand Hold.R`, left→`Hand Hold.L`) + `setCustomMeshVisibleByStem(model, stem, visible)` helper (dual-flags both `isVisible` AND `setEnabled`). `ModelInstance` gains optional `customSlots: CustomSlots` and `libraryAttachments: Map<'rightHand'|'leftHand', Mesh>` (populated only on Custom).
+- **`engine.ts`** — `applySlotToCustom(model, slot, value)` is the single dispatcher. For body/helmet/bodyArmor/legArmor: flips visibility on the native stem. For rightHand/leftHand: disposes any prior library attachment, then either shows native, hides native, or attaches `library:<stem>` via the existing `attachWeaponToHand` (which itself uses `setEnabled(false)` to hide the in-skeleton sword/shield — that's WHY `setCustomMeshVisibleByStem` must dual-flag, otherwise going library→native leaves the native mesh disabled forever).
+- **Engine API** — `getCustomSlots()`, `setCustomSlot(slot, value)`, `setCustomSlots(slots)`, `resetCustomSlots()`, `addCustomSlotsListener(fn)`, `getCustomSlotsRevision()`, `getWeaponLibrary()` (exposes the catalogue to the UI).
+- **`BoneControls.tsx`** — `CreatorTab` renders six `<SlotToggleRow>` / `<SlotSelectRow>` rows + a "Reset to default kit" button. Library weapons populate Right/Left Hand selects as `library:<stem>` options.
+- **`EditorPanel.tsx`** — `customSlotsRev` state replaces the prior `creatorPartsRev`. Hydration reads `data.customSlots` from library.json (silently ignores legacy `creatorParts`). Save payload includes `customSlots`, drops `creatorParts`.
 
-```ts
-{
-  id: string                  // crypto.randomUUID
-  boneName: string            // e.g. 'Head', 'Upper Arm.L'
-  shape: 'sphere' | 'box' | 'cylinder' | 'capsule' | 'clone'
-  scale: [x, y, z]            // primitives: metres. clone: multiplier (1.0 = native)
-  offset: [x, y, z]           // metres in bone-local
-  rotation: [x, y, z]         // Euler degrees
-  color: string               // #rrggbb (own StandardMaterial, never shared)
-}
-```
+### Real-time-update fix (same June 2 session)
 
-UI: `size` row shows `cm` for primitives, `size %` for clones (because clone scale is a multiplier). All other rows (offset, rotation) are the same units across shapes.
+First slot-rebuild ship had a bug: swapping weapons required Ctrl+R to see the change. Root cause: `attachWeaponToHand` hides the native via `setEnabled(false)`, but the slot toggle only set `isVisible`. Going library→native left the mesh disabled. Plus the newly-attached groupRoot wasn't getting its world matrix recomputed on the same frame it was created. Two fixes:
 
-### Engine API (`window.__editor`)
+1. **`setCustomMeshVisibleByStem` now dual-flags `isVisible` + `setEnabled`** so both directions work regardless of which flag `attachWeaponToHand` uses.
+2. **`attachWeaponToHand` now force-recomputes world matrices on the new groupRoot + children** right after parenting/transform via `computeWorldMatrix(true)`. Without this, the mesh exists in the scene but isn't rendered until a later frame triggers a parent-chain walk.
 
-- `addCreatorPart(shape, boneName) → id | null` — gated on activeIdx === 2.
-- `updateCreatorPart(id, patch)` — partial mutate. Shape-change rebuilds. Bone-change on a clone re-extracts geometry; primitive just reparents.
-- `deleteCreatorPart(id)` — disposes mesh + material.
-- `getCreatorParts() → CreatorPart[]` — for persistence save.
-- `setCreatorParts(parts[])` — bulk replace for hydrate. Skips bones that don't exist.
-- `addCreatorPartsListener(fn) → unsub` — fires on any mutation. EditorPanel subscribes to bump `creatorPartsRev` state and trigger the debounced save.
-- `getCreatorPartsRevision() → number` — monotonic counter.
+### What survived from the old Creator
 
-### Persistence
+- **Per-instance material cache** (`matCache: Map<slot, StandardMaterial>` in `loadKnightInstance`) — untouched. Style tab still recolours Custom independently from Model 1/2.
+- **Weapon library** (`WEAPON_CATALOGUE` + `loadWeaponLibrary` + `attachWeaponToHand`) — fully reused for the Right/Left Hand slot options. Same `(90, 90, 30)` rotation + grip-at-bottom + handle stretch the prior hero attach used.
+- **Debounced library.json save** (~500ms in EditorPanel) — reuse the same effect, just includes `customSlots` in the payload now instead of `creatorParts`.
 
-Library JSON gains `creatorParts: CreatorPart[]`. EditorPanel.tsx:
-- Hydrate: polls `__editor.setCreatorParts` until ready (createEditorScene is async), retries every 200ms up to 10s.
-- Save: includes `__editor.getCreatorParts()` in the 500ms debounced POST payload. `creatorPartsRev` is a dep on the save useEffect so engine-side mutations trigger persistence even though parts live OUTSIDE React state.
+### What got deleted
 
-The Vite dev plugin (`vite-plugins/animation-saver.ts`) writes the payload verbatim; default-GET fallback seeds `creatorParts: []` for new installs.
+- **`src/editor/creator-parts.ts`** — entire ~700-line file (`extractBoneGeometry`, `createClonePart`, `createPropClonePart`, `createPropGroupClonePart`, `placeholderClone`, `applyColor`, `sampleMaterialHex`, all per-part mesh lifecycle).
+- **Engine APIs** — `addCreatorPart`, `addCreatorPropClone`, `addCreatorPropGroupClone`, `addCreatorWeaponClone`, `updateCreatorPart`, `deleteCreatorPart`, `getCreatorParts`, `setCreatorParts`, `getCreatorTargets`, `addCreatorPartsListener`, `getCreatorPartsRevision`.
+- **Types** — `CreatorPart`, `CreatorShape`, `CreatorPartInstance`.
+- **Allowlists** — `BODY_MESH_STEMS`, `ARMOR_MESH_STEMS`.
+- **Rest-matrix infrastructure** — `restBoneWorldMatrices: Map<string, Matrix>` + `restMeshWorldMatrices: Map<number, Matrix>` captured per model in `loadKnightInstance` (added during the v3 troubleshooting; nothing reads them now).
+- **`ModelInstance.creatorParts: Map`** field.
+- **`BoneControls.tsx`** — entire old CreatorTab + CategorizedParts + PartRow + PartTripleRow + PartNumInput + ~200 lines of unused styles.
 
-### Skeleton-only model load
+### Accepted limitations
 
-`loadKnightInstance(..., hideAllMeshes = true)`:
-- Loads the full GLB as normal (all 8 skeletons, all animations stopped, rest pose captured).
-- After material assignment, walks `result.meshes` and sets `isVisible = false` on every `Mesh` with vertices.
-- Bones / TransformNodes / skeletons are untouched, so the Custom model still poses correctly through the standard editor path. Parts parented to bones render against the otherwise-empty hierarchy.
+- **Slot collapse**: v3 baked Hair/Shirt/Pants/Shoes into the single `Body` mesh + materials. Users cannot turn off the shirt independently. Recolour via Style tab if needed.
+- **No part stacking**: a Custom knight is exactly one Body + one Helmet + etc. To "swap" you replace; you don't accumulate. Aligns with what the user wanted ("not adding bullshit over and over").
 
-### Implementation files
+### Lessons captured (rebuild session, 2026-06-02)
 
-- `src/editor/editor-scene.ts` — Model 3 load + `CreatorShape` + `CreatorPart` + `CreatorPartInstance` types. ModelInstance also carries `creatorParts: Map<string, CreatorPartInstance>` plus the (mostly-legacy) `restBoneWorldMatrices` + `restMeshWorldMatrices` (kept around even though `getAbsoluteInverseBindMatrix` superseded their use).
-- `src/editor/creator-parts.ts` — `createPartMesh`, `updatePartMesh`, `disposePartMesh`, `defaultPartFor`, `extractBoneGeometry`. Primitive vs clone branching lives here.
-- `src/game/engine.ts` — exposes the API on `window.__editor`. Maintains `creatorPartsRev` counter + listener list.
-- `src/editor/BoneControls.tsx` — `CreatorTab`, `PartRow`, `PartTripleRow`, `PartNumInput` components. Shape select + bone select + Add row. Per-part row has a bone-retarget dropdown.
-- `src/editor/EditorPanel.tsx` — persistence hydrate + save.
-- `scripts/qa-creator.mjs` — Playwright round-trip QA (add 4 parts → edit one → reload → verify persistence).
-
-### UI styling lessons
-
-- The Add row had a shape select + bone select + Add button competing for ~240px of panel width. Long bone names like "Upper Leg.L" exceed a 88px-fixed select. Final layout: selects are `flex: 1 1 80px` (share remaining space, shrink past content via `min-width: 0`), button is `flex: 0 0 auto` (fixed, never gets pushed off), row is `flex-wrap: wrap` (drops button to second line on extreme narrow widths). Same pattern for PartRow header.
-
-### Props + grouping (May 26)
-
-- Sword/shield are **non-skinned static meshes** parented under bone TransformNodes in the GLB. The skinned-clone path (inverse bind + attachToBone) doesn't pick them up — they need a different path: direct `mesh.parent = boneLinkedNode` + copy local transform from source. `createPropClonePart()` handles single-mesh props; `createPropGroupClonePart()` handles multi-primitive groups.
-- **Group parts**: a group is a 0-vertex `Mesh` parented to the bone, with N child meshes (one per source primitive) nested under it. The group root carries the user's scale/offset/rotation — children stay at their copied source-local poses, so the group transforms as one rigid body. Color updates loop through every child's material.
-- **`CreatorPartInstance.groupChildren`** array holds `{mesh, material}` pairs for disposal + color application. Without it, dispose would leak the child materials (each owns its own — not shared via matCache).
-- **Stem detection** for grouping: the GLB loader names multi-material primitives `<stem>_primitive<N>`. `getCreatorTargets()` regexes that suffix and groups primitives by stem. Single-primitive props pass through as flat clones.
-- **Schema additions on `CreatorPart`** for the prop path: `sourceMeshName?: string` (single prop OR group label) and `groupMeshNames?: string[]` (the actual child mesh names — only set on groups). Persistence is unchanged: all fields ride through library.json.
-- **Auto-bone resolution for props**: when the user picks a prop from the dropdown, the engine walks the source mesh's `parent` chain to find the closest bone-linked TransformNode, sets `part.boneName` to that bone, and attaches the clone to the same-named bone on Custom. User never needs to know which bone holds the sword.
-
-### Categorised target dropdown (May 26)
-
-- Native `<select>` doesn't support nested `<optgroup>`, and optgroup labels are styled by the OS (invisible on dark dropdowns). Workaround: build a 3-level visual hierarchy from regular `<option>` rows with 3 styles:
-  - **Category** (`▸ Bones`, `▸ Weapons`) — disabled, bold, brightest grey on `#0a0c0f`.
-  - **Subcategory** (`   ▸ Torso`, `   ▸ Sword`) — disabled, medium weight, slightly lighter background.
-  - **Item** — selectable, full white on `#1c1f24`, prefixed with 8 unicode spaces for visual indent.
-- Bone subcategories come from the existing `categorize()` helper (Torso / Left Arm / Right Arm / Left Leg / Right Leg / IK Helpers / Other). Empty groups are filtered out.
-- Weapon subcategories are keyword-matched on stem (`/sword/i`, `/shield/i`, else "Other"). Add `axe`, `bow`, etc by extending the `weaponSubcats` array.
-- Dropdown shows only **ACTIVE_BONES** (19 combat-relevant bones), not the full 35-bone rig — fingers/toes/IK helpers aren't useful clone targets.
-
-### PartRow accordion (May 26 → simplified May 27)
-
-- Each part has a chevron `▶`/`▼` header that toggles a body panel. Default collapsed so many parts (a built-up Custom model) stays scannable.
-- **May 27**: header simplified to ONE row — chevron + bone dropdown + delete `×`. The category (Body / Armor / Weapon) is shown by the section header above the card, so the card itself only carries the bone identity. Drop the previous prop-name/shape label row.
-- Click chevron to toggle. Body (expanded) has size %, offset cm, rotation° (X/Y/Z labelled), color picker. Local React state (not persisted) — opens collapsed on tab entry.
-
-### Body / Armor split (May 27)
-
-- `CreatorPart.meshFilter?: string[]` clamps skinned bone extraction to a specific subset of source meshes. `extractBoneGeometry` skips any source mesh whose name-stem isn't in the filter (`m.name.split('_primitive')[0]` to strip Babylon's multi-material suffix).
-- Exported from `editor-scene.ts`:
-  - `BODY_MESH_STEMS = ['Body', 'Hair', 'Shirt', 'Pants', 'Shoes']` — skin + cloth-under-armor.
-  - `ARMOR_MESH_STEMS = ['Helmet', 'Platebody', 'Platelegs']` — metal pieces.
-- Add-target dropdown gains an `▸ Armor` category alongside `▸ Body` with the same bone-region subcategories. Encoded as `body:<bone>` / `armor:<bone>` in the value. `onAdd` decodes and calls `addCreatorPart('clone', bone, meshFilter)`.
-- Result: cloning "Body › Torso › Chest" pulls Body+Shirt+Pants+Shoes+Hair triangles weighted to the Chest bone (skin-coloured). Cloning "Armor › Torso › Chest" pulls Helmet+Platebody+Platelegs triangles weighted to Chest (metal-coloured). The two layers can be added independently and recoloured separately later via the style panel.
-- The first contributing source's material is used as the colour seed (`firstSourceMaterial` returned by `extractBoneGeometry`), so the filter naturally pushes the seed toward skin material vs metal material depending on category.
-
-### Sectioned cards (May 27)
-
-The Creator parts list itself is now sectioned to mirror the Add dropdown's taxonomy:
-
-```
-▸ Body
-   ▸ Torso        [Hips / Spine / Chest cards]
-   ▸ Left Arm     [...]
-▸ Armor
-   ▸ Torso        [Helmet, Platebody pieces]
-   …
-▸ Weapons         [axe / sword / shield cards]
-```
-
-`CategorizedParts` in `BoneControls.tsx` partitions by `categorizePart(p)`:
-- `weapon` if `sourceMeshName` or `groupMeshNames` set.
-- `armor` if `meshFilter` contains any `ARMOR_MESH_STEMS` member.
-- `body` otherwise (default + meshFilter matching BODY).
-- `other` for legacy primitives (sphere/box from before clone-only).
-
-Within Body and Armor, parts are sub-grouped by `categorize([p.boneName])[0].name` (Torso / Left Arm / Right Arm / Left Leg / Right Leg / IK Helpers / Other) so adjacent body parts cluster visually.
+- **When two surgical fixes in a row don't restore broken behavior, scrap and rebuild instead of round 3.** Two rounds were spent on the per-bone-clone Creator after the v3 swap — rest-world matrix composition fix (correct math but didn't help symptoms) and name-based bone matching (also correct in principle, but the user still saw garbage). The data structure assumed v1's per-part mesh granularity. v3 collapsed all body pieces into one mesh + one material — the abstraction the old Creator was built on no longer existed. The right move was admitting the asset reality and building a smaller surface that matches it (slot toggles), not patching the old extraction logic.
+- **Symptom diagnostic order matters.** First instinct on "yellow blobs" was bone-index mismatch (off-by-one shift between glTF joints and Babylon's bones array). That was a real hypothesis worth testing — but I should have first run the rest-world matrix decompose log on the live scene to confirm what `meshWorldMat` actually contained on v3. Pure code inspection couldn't distinguish "vertices in wrong space" from "wrong bone weighted". Future rule: when adding diagnostic logging, RUN the dev server and gather one round of data BEFORE proposing the next code fix.
+- **When `attachWeaponToHand` uses `setEnabled(false)` and the new slot toggle uses `isVisible`, they're not symmetric.** The first slot rebuild ship missed this — weapons couldn't swap in real-time because going library→native left the native mesh disabled. Generalizable: when two code paths manipulate the same mesh's "hidden" state via different flags, always pick ONE flag and use it everywhere, or dual-flag at every entry point.
+- **Babylon meshes parented to a bone at runtime need an explicit `computeWorldMatrix(true)` to render the same frame.** Without it, the new mesh is in the scene graph but its world matrix isn't computed until a later frame triggers a parent-chain walk. Visible symptom: "I have to Ctrl-R for the new weapon to appear". One-line fix in `attachWeaponToHand` after the scale/rotation set.
+- **Slot-based UIs prevent "add bullshit twice"-class bugs by construction.** When each slot can only hold one option, accidentally double-clicking "Add" can't create duplicates. The old Creator's parts-list grew arbitrarily on every click, including silent failures — the slot system eliminates that whole failure mode.
+- **GLB introspection from Python via the binary header pays off.** Used `python3 -c "import struct, json; ..."` on `public/models/knight.glb` to enumerate skin.joints, meshes, materials, and the node→mesh map directly from the JSON chunk. This is FASTER than booting the dev server + console.log just to learn the asset's structure. Useful diagnostic in future Babylon-asset triage.
 
 ## Per-model Style tab (May 27)
 

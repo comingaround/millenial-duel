@@ -117,6 +117,11 @@ export default function EditorPanel() {
   // effect dep so persistence fires on every slot toggle. Slot state lives
   // on the engine (Custom model's customSlots field), not in React state.
   const [customSlotsRev, setCustomSlotsRev] = useState(0)
+  // SAVED material snapshot for the Style tab. Keyed by model name → slot
+  // → hex. Mutated only by the Save button (live colour drags do NOT
+  // touch this), so Revert can re-apply this exact state and the
+  // auto-save loop only writes to disk on explicit Save.
+  const [editorMaterials, setEditorMaterials] = useState<Record<string, Record<string, string>>>({})
   // Import-baked-animation modal
   const [importOpen, setImportOpen] = useState(false)
   const [bakedList, setBakedList] = useState<Array<{ name: string; from: number; to: number }>>([])
@@ -247,6 +252,28 @@ export default function EditorPanel() {
               setTimeout(() => clearInterval(iv), 10000)
             }
           }
+          // Editor materials snapshot — same engine-ready polling
+          // pattern. Push into the live matCache AND seed the engine's
+          // saved-snapshot store (so Revert works without first Save'ing)
+          // AND mirror into React state for the auto-save loop.
+          if (data.editorMaterials && typeof data.editorMaterials === 'object') {
+            setEditorMaterials(data.editorMaterials)
+            const tryApplyMats = () => {
+              const ed = (window as any).__editor
+              if (ed?.applyEditorMaterials && ed?.setSavedEditorMaterials) {
+                ed.applyEditorMaterials(data.editorMaterials)
+                ed.setSavedEditorMaterials(data.editorMaterials)
+                return true
+              }
+              return false
+            }
+            if (!tryApplyMats()) {
+              const iv = setInterval(() => {
+                if (tryApplyMats()) clearInterval(iv)
+              }, 200)
+              setTimeout(() => clearInterval(iv), 10000)
+            }
+          }
         }
       } catch {
         // No persistence endpoint (e.g. production build) — silent
@@ -258,6 +285,7 @@ export default function EditorPanel() {
     let unsubSlots: (() => void) | null = null
     let unsubModels: (() => void) | null = null
     let unsubFocus: (() => void) | null = null
+    let unsubEditorMats: (() => void) | null = null
     const tryAttach = () => {
       const ed = window.__editor
       if (!ed) return false
@@ -283,6 +311,12 @@ export default function EditorPanel() {
         const i = (ed as any).getFocusedModelIdx?.()
         if (typeof i === 'number') setFocusedModel(i)
       }) ?? null
+      // Subscribe to Style Save events — mirror engine snapshot into
+      // React state so the auto-save loop persists it to library.json.
+      unsubEditorMats = (ed as any).addEditorMaterialsListener?.(() => {
+        const snap = (ed as any).getSavedEditorMaterials?.() ?? {}
+        setEditorMaterials({ ...snap })
+      }) ?? null
       setEditorReady(true)
       return true
     }
@@ -297,6 +331,7 @@ export default function EditorPanel() {
         unsubSlots?.()
         unsubModels?.()
         unsubFocus?.()
+        unsubEditorMats?.()
       }
     }
     return () => {
@@ -305,6 +340,7 @@ export default function EditorPanel() {
       unsubSlots?.()
       unsubModels?.()
       unsubFocus?.()
+      unsubEditorMats?.()
     }
   }, [])
 
@@ -344,6 +380,7 @@ export default function EditorPanel() {
         animations,
       }
       if (customSlots) payload.customSlots = customSlots
+      if (Object.keys(editorMaterials).length > 0) payload.editorMaterials = editorMaterials
       // Only write the v2 marker AFTER a successful retarget (or if data
       // came in already marked). A skipped retarget must not poison the
       // file with a false-positive marker — without the marker, next
@@ -356,7 +393,7 @@ export default function EditorPanel() {
       }).catch(() => {})
     }, 500)
     return () => clearTimeout(timer)
-  }, [poses, anchors, animations, hydrated, customSlotsRev, libraryRetargeted])
+  }, [poses, anchors, animations, hydrated, customSlotsRev, libraryRetargeted, editorMaterials])
 
   // Expose resolved animations to window so engine.ts can dispatch keys
   useEffect(() => {
