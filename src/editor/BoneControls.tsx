@@ -14,19 +14,22 @@ const UNDO_BURST_MS = 300
 type PanelMode = 'bones' | 'style' | 'creator'
 type EditorMaterial = { name: string; hex: string }
 
-// Mirror of CreatorPart from editor-scene.ts (avoid cross-import cycle).
-type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule' | 'clone'
-type CreatorPart = {
-  id: string
-  boneName: string
-  shape: CreatorShape
-  scale: [number, number, number]
-  offset: [number, number, number]
-  rotation: [number, number, number]
-  color: string
-  sourceMeshName?: string
-  groupMeshNames?: string[]
-  meshFilter?: string[]
+// Local mirror of CustomSlots (avoid cross-import for runtime).
+type CustomSlots = {
+  body: 'none' | 'body'
+  helmet: 'none' | 'helmet'
+  bodyArmor: 'none' | 'platebody'
+  legArmor: 'none' | 'platelegs'
+  rightHand: string  // 'none' | 'sword' | `library:${stem}`
+  leftHand: string   // 'none' | 'shield' | `library:${stem}`
+}
+const DEFAULT_CUSTOM_SLOTS: CustomSlots = {
+  body: 'body',
+  helmet: 'helmet',
+  bodyArmor: 'platebody',
+  legArmor: 'platelegs',
+  rightHand: 'sword',
+  leftHand: 'shield',
 }
 
 export default function BoneControls() {
@@ -42,18 +45,12 @@ export default function BoneControls() {
     setBodyPos({ x, y, z })
   }
   const [materials, setMaterials] = useState<EditorMaterial[]>([])
-  // ─── Creator state ───
-  const [creatorParts, setCreatorParts] = useState<CreatorPart[]>([])
+  // ─── Creator (slot-based) state ───
+  const [customSlots, setCustomSlotsLocal] = useState<CustomSlots>(DEFAULT_CUSTOM_SLOTS)
   const [activeModelIdx, setActiveModelIdx] = useState(0)
-  // addTarget is a string formatted as either "bone:Head" or "prop:Sword".
-  // Single dropdown with both kinds; the prefix tells the engine which
-  // path to dispatch on Add.
-  const [addTarget, setAddTarget] = useState<string>('body:Head')
-  const [creatorTargets, setCreatorTargets] = useState<{
-    bones: string[]
-    props: Array<{ stem: string; members: string[] }>
-    weapons: Array<{ stem: string; members: string[]; kind: string }>
-  }>({ bones: [], props: [], weapons: [] })
+  // Library weapons available for the Right/Left hand slots — populated
+  // from the engine's weapon catalogue (axe_textured, double_edge_axe, …).
+  const [libraryWeapons, setLibraryWeapons] = useState<Array<{ stem: string; kind: string }>>([])
 
   useEffect(() => {
     let unsub: (() => void) | null = null
@@ -96,21 +93,22 @@ export default function BoneControls() {
     return () => cancelAnimationFrame(rafId)
   }, [])
 
-  // Refresh the local creator-parts mirror from the engine when entering
-  // the Creator tab (and whenever an op modifies it).
-  const refreshCreatorParts = () => {
+  // Refresh local slot mirror + library-weapon catalogue when the Creator
+  // tab opens. The engine is the source of truth for slot state.
+  const refreshCustomSlots = () => {
     const ed = (window as any).__editor
-    setCreatorParts(ed?.getCreatorParts?.() ?? [])
+    const slots = ed?.getCustomSlots?.() as CustomSlots | undefined
+    if (slots) setCustomSlotsLocal(slots)
   }
   useEffect(() => {
     if (panelMode === 'creator') {
-      refreshCreatorParts()
-      // Refresh the bone+prop target list every time the Creator tab
-      // opens — source meshes don't change at runtime but lazy-init avoids
-      // running the enumeration before the engine is ready.
+      refreshCustomSlots()
       const ed = (window as any).__editor
-      const t = ed?.getCreatorTargets?.()
-      if (t) setCreatorTargets(t)
+      // Pull the library weapon list once (the catalogue doesn't change
+      // at runtime). Each entry has its stem + kind for grouping.
+      const lib: Array<{ stem: string; kind: string }> | undefined =
+        ed?.getWeaponLibrary?.() ?? ed?.weaponLibrary
+      if (lib && Array.isArray(lib)) setLibraryWeapons(lib.map((w) => ({ stem: w.stem, kind: w.kind })))
     }
   }, [panelMode])
 
@@ -200,12 +198,9 @@ export default function BoneControls() {
       {panelMode === 'creator' ? (
         <CreatorTab
           activeModelIdx={activeModelIdx}
-          parts={creatorParts}
-          addTarget={addTarget}
-          setAddTarget={setAddTarget}
-          creatorTargets={creatorTargets}
-          activeBones={activeBones}
-          onChange={refreshCreatorParts}
+          slots={customSlots}
+          libraryWeapons={libraryWeapons}
+          onChange={refreshCustomSlots}
         />
       ) : panelMode === 'style' ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -582,38 +577,33 @@ function categorize(allBones: string[]): Array<{ name: string; bones: string[] }
 }
 
 // ──────────────────────────────────────────────────────────────────
-// CreatorTab — build the Custom model (Model 3) by cloning body parts
-// + props (sword, shield) from Model 1. Gated to active model = 2.
-// Procedural primitives (sphere/box/cylinder/capsule) were dropped from
-// the Add UI — the clone path covers all real use cases. Legacy parts
-// in library.json still render via creator-parts.ts.
+// CreatorTab — slot-based wardrobe for the Custom (Model 3) knight.
+// Six slots: Body / Helmet / Body Armor / Leg Armor / Right Hand /
+// Left Hand. Each slot picks ONE option from a small fixed list; the
+// engine flips mesh visibility (or attaches a library weapon) to match.
+// Replaces the prior per-bone clone Creator that broke on the v3 knight.
 // ──────────────────────────────────────────────────────────────────
 const CUSTOM_MODEL_IDX = 2
-// Mesh-stem layer filters — mirror of BODY_MESH_STEMS / ARMOR_MESH_STEMS
-// in editor-scene.ts. Used by the Creator's bone-clone path to split
-// "Body" (skin + cloth) from "Armor" (metal pieces).
-const BODY_MESH_STEMS = ['Body', 'Hair', 'Shirt', 'Pants', 'Shoes']
-const ARMOR_MESH_STEMS = ['Helmet', 'Platebody', 'Platelegs']
+
+// Pretty labels for the right-side panel sections.
+const SLOT_LABELS: Record<keyof CustomSlots, string> = {
+  body: 'Body',
+  helmet: 'Helmet',
+  bodyArmor: 'Body Armor',
+  legArmor: 'Leg Armor',
+  rightHand: 'Right Hand',
+  leftHand: 'Left Hand',
+}
 
 function CreatorTab({
   activeModelIdx,
-  parts,
-  addTarget,
-  setAddTarget,
-  creatorTargets,
-  activeBones,
+  slots,
+  libraryWeapons,
   onChange,
 }: {
   activeModelIdx: number
-  parts: CreatorPart[]
-  addTarget: string
-  setAddTarget: (t: string) => void
-  creatorTargets: {
-    bones: string[]
-    props: Array<{ stem: string; members: string[] }>
-    weapons: Array<{ stem: string; members: string[]; kind: string }>
-  }
-  activeBones: string[]
+  slots: CustomSlots
+  libraryWeapons: Array<{ stem: string; kind: string }>
   onChange: () => void
 }) {
   if (activeModelIdx !== CUSTOM_MODEL_IDX) {
@@ -627,391 +617,109 @@ function CreatorTab({
     )
   }
 
-  // Targets: bones first, then prop stems. Encoded as "bone:Name" or
-  // "prop:stem" — for groups, the engine resolves member meshes by stem.
-  // Bone list is the ACTIVE subset (19 combat-relevant bones) — fingers/
-  // toes/IK helpers aren't useful clone targets, so they're hidden.
-  const activeBoneSet = new Set(activeBones)
-  const boneOptions = (creatorTargets.bones.length ? creatorTargets.bones : activeBones)
-    .filter((b) => activeBoneSet.has(b))
-  const propOptions = creatorTargets.props
-  const weaponOptions = creatorTargets.weapons
-  const propByStem = new Map(propOptions.map((p) => [p.stem, p]))
-  const weaponByStem = new Map(weaponOptions.map((w) => [w.stem, w]))
-  const onAdd = () => {
-    const ed = (window as any).__editor
-    if (addTarget.startsWith('weapon:')) {
-      const stem = addTarget.slice(7)
-      const wpn = weaponByStem.get(stem)
-      if (!wpn) return
-      ed?.addCreatorWeaponClone?.(stem, wpn.members)
-    } else if (addTarget.startsWith('prop:')) {
-      const stem = addTarget.slice(5)
-      const prop = propByStem.get(stem)
-      if (!prop) return
-      // Single-primitive → flat prop clone. Multi-primitive → group.
-      if (prop.members.length > 1) {
-        ed?.addCreatorPropGroupClone?.(stem, prop.members)
-      } else {
-        ed?.addCreatorPropClone?.(prop.members[0])
-      }
-    } else if (addTarget.startsWith('body:')) {
-      ed?.addCreatorPart?.('clone', addTarget.slice(5), BODY_MESH_STEMS)
-    } else if (addTarget.startsWith('armor:')) {
-      ed?.addCreatorPart?.('clone', addTarget.slice(6), ARMOR_MESH_STEMS)
-    } else {
-      const bone = addTarget.startsWith('bone:') ? addTarget.slice(5) : addTarget
-      ed?.addCreatorPart?.('clone', bone)
-    }
+  const setSlot = (slot: keyof CustomSlots, value: string) => {
+    ;(window as any).__editor?.setCustomSlot?.(slot, value)
+    onChange()
+  }
+  const resetAll = () => {
+    ;(window as any).__editor?.resetCustomSlots?.()
     onChange()
   }
 
-  // Bones grouped by body part via the existing categorize() helper.
-  // Filter out empty groups + the "Other" catch-all when it's empty.
-  const boneGroups = categorize(boneOptions).filter((g) => g.bones.length > 0)
-  // Weapons grouped by type (sword/shield/other). Keyword match on stem
-  // — works for the current rig where weapon mesh names contain "sword"
-  // or "shield". When new weapon types arrive (axe, bow, …), add a
-  // matcher here.
-  const weaponSubcats: Array<{ name: string; props: typeof propOptions }> = [
-    { name: 'Sword',  props: propOptions.filter((p) => /sword/i.test(p.stem)) },
-    { name: 'Shield', props: propOptions.filter((p) => /shield/i.test(p.stem)) },
-    { name: 'Other',  props: propOptions.filter((p) => !/sword|shield/i.test(p.stem)) },
-  ].filter((s) => s.props.length > 0)
-
-  // Weapon-library items grouped by `kind` (axe/sword/bow/etc.). The
-  // engine already classifies them at scene init via the WEAPON_CATALOGUE.
-  const libraryByKind = new Map<string, typeof weaponOptions>()
-  for (const w of weaponOptions) {
-    const k = w.kind || 'other'
-    if (!libraryByKind.has(k)) libraryByKind.set(k, [])
-    libraryByKind.get(k)!.push(w)
-  }
-  const libraryKindOrder = ['sword', 'axe', 'dagger', 'mace', 'hammer', 'bow', 'shield', 'other']
-  const librarySubcats = libraryKindOrder
-    .filter((k) => libraryByKind.has(k))
-    .map((k) => ({ name: k.charAt(0).toUpperCase() + k.slice(1), items: libraryByKind.get(k)! }))
+  // Hand slots get None + native + every library weapon. Body/armor slots
+  // are simple on/off toggles.
+  const handOptions = (native: string, nativeLabel: string) => [
+    { value: 'none', label: 'None' },
+    { value: native, label: nativeLabel },
+    ...libraryWeapons.map((w) => ({
+      value: `library:${w.stem}`,
+      label: `${w.stem} (${w.kind})`,
+    })),
+  ]
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto' }}>
-      <div style={creatorAddRowStyle}>
-        <select
-          value={addTarget}
-          onChange={(e) => setAddTarget(e.target.value)}
-          style={{ ...creatorSelectStyle, flex: '1 1 100%' }}
-        >
-          {/* True 3-level nesting in a native <select> is impossible
-              (browsers ignore nested optgroups + style optgroup labels
-              via OS theme). We emulate it with disabled separator rows
-              and unicode-space indentation on each level:
-                ▸ Category            (disabled, no indent)
-                  ▸ Subcategory       (disabled, 1 indent)
-                      Item            (selectable, 2 indents) */}
-          {boneGroups.length > 0 ? (
-            <option disabled value="" style={creatorCategoryStyle}>
-              {'▸ Body'}
-            </option>
-          ) : null}
-          {boneGroups.map((g) => (
-            <React.Fragment key={`body-${g.name}`}>
-              <option disabled value="" style={creatorSubcategoryStyle}>
-                {`   ▸ ${g.name}`}
-              </option>
-              {g.bones.map((b) => (
-                <option key={`body-${b}`} value={`body:${b}`} style={creatorItemStyle}>
-                  {`        ${b}`}
-                </option>
-              ))}
-            </React.Fragment>
-          ))}
-          {/* Armor — same bone subcategories, extraction filtered to
-              metal pieces (Helmet/Platebody/Platelegs). Independent of
-              Body so you can colour armour separately. */}
-          {boneGroups.length > 0 ? (
-            <option disabled value="" style={creatorCategoryStyle}>
-              {'▸ Armor'}
-            </option>
-          ) : null}
-          {boneGroups.map((g) => (
-            <React.Fragment key={`armor-${g.name}`}>
-              <option disabled value="" style={creatorSubcategoryStyle}>
-                {`   ▸ ${g.name}`}
-              </option>
-              {g.bones.map((b) => (
-                <option key={`armor-${b}`} value={`armor:${b}`} style={creatorItemStyle}>
-                  {`        ${b}`}
-                </option>
-              ))}
-            </React.Fragment>
-          ))}
-          {weaponSubcats.length > 0 ? (
-            <option disabled value="" style={creatorCategoryStyle}>
-              {'▸ Weapons'}
-            </option>
-          ) : null}
-          {weaponSubcats.map((s) => (
-            <React.Fragment key={`wg-${s.name}`}>
-              <option disabled value="" style={creatorSubcategoryStyle}>
-                {`   ▸ ${s.name}`}
-              </option>
-              {s.props.map((p) => (
-                <option key={`p-${p.stem}`} value={`prop:${p.stem}`} style={creatorItemStyle}>
-                  {`        ${p.stem}${p.members.length > 1 ? ` (${p.members.length} parts)` : ''}`}
-                </option>
-              ))}
-            </React.Fragment>
-          ))}
-          {/* Third category: weapon library (GLBs from /models/weapons/). */}
-          {librarySubcats.length > 0 ? (
-            <option disabled value="" style={creatorCategoryStyle}>
-              {'▸ Weapons (library)'}
-            </option>
-          ) : null}
-          {librarySubcats.map((s) => (
-            <React.Fragment key={`lg-${s.name}`}>
-              <option disabled value="" style={creatorSubcategoryStyle}>
-                {`   ▸ ${s.name}`}
-              </option>
-              {s.items.map((w) => (
-                <option key={`w-${w.stem}`} value={`weapon:${w.stem}`} style={creatorItemStyle}>
-                  {`        ${w.stem}${w.members.length > 1 ? ` (${w.members.length} parts)` : ''}`}
-                </option>
-              ))}
-            </React.Fragment>
-          ))}
-        </select>
-        <button style={creatorAddBtnStyle} onClick={onAdd}>+ Add</button>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', padding: '4px 2px 8px' }}>
+      <SlotToggleRow
+        label={SLOT_LABELS.body}
+        on={slots.body !== 'none'}
+        onChange={(on) => setSlot('body', on ? 'body' : 'none')}
+      />
+      <SlotToggleRow
+        label={SLOT_LABELS.helmet}
+        on={slots.helmet !== 'none'}
+        onChange={(on) => setSlot('helmet', on ? 'helmet' : 'none')}
+      />
+      <SlotToggleRow
+        label={SLOT_LABELS.bodyArmor}
+        on={slots.bodyArmor !== 'none'}
+        onChange={(on) => setSlot('bodyArmor', on ? 'platebody' : 'none')}
+      />
+      <SlotToggleRow
+        label={SLOT_LABELS.legArmor}
+        on={slots.legArmor !== 'none'}
+        onChange={(on) => setSlot('legArmor', on ? 'platelegs' : 'none')}
+      />
+      <SlotSelectRow
+        label={SLOT_LABELS.rightHand}
+        value={slots.rightHand}
+        options={handOptions('sword', 'Sword (native)')}
+        onChange={(v) => setSlot('rightHand', v)}
+      />
+      <SlotSelectRow
+        label={SLOT_LABELS.leftHand}
+        value={slots.leftHand}
+        options={handOptions('shield', 'Shield (native)')}
+        onChange={(v) => setSlot('leftHand', v)}
+      />
+      <button style={resetBtnStyle} onClick={resetAll}>Reset to default kit</button>
+      <div style={{ fontSize: 10, opacity: 0.45, marginTop: 8 }}>
+        Recolor each slot's materials via the <b>Style</b> tab — colours apply
+        independently to Custom.
       </div>
-
-      <div style={{ fontSize: 10, opacity: 0.55, marginBottom: 6 }}>
-        {parts.length} part{parts.length === 1 ? '' : 's'} on Custom model
-      </div>
-
-      {parts.length === 0 ? (
-        <div style={{ fontSize: 11, opacity: 0.45 }}>
-          (Pick a body bone, armor or weapon → Add)
-        </div>
-      ) : (
-        <CategorizedParts parts={parts} bones={boneOptions} onChange={onChange} />
-      )}
     </div>
   )
 }
 
-// Group parts by category (Body / Armor / Weapon) so the list mirrors
-// the Add dropdown's structure. Within Body/Armor, further split by
-// bone region (Torso / Arms / Legs) via the existing categorize() helper.
-function categorizePart(p: CreatorPart): 'body' | 'armor' | 'weapon' | 'other' {
-  if (p.sourceMeshName || p.groupMeshNames) return 'weapon'
-  if (p.shape !== 'clone') return 'other'  // legacy primitives
-  if (!p.meshFilter || p.meshFilter.length === 0) return 'body'
-  if (p.meshFilter.some((s) => ARMOR_MESH_STEMS.includes(s))) return 'armor'
-  return 'body'
-}
-
-function CategorizedParts({
-  parts, bones, onChange,
-}: { parts: CreatorPart[]; bones: string[]; onChange: () => void }) {
-  // Partition into buckets in stable order.
-  const buckets = { body: [] as CreatorPart[], armor: [] as CreatorPart[], weapon: [] as CreatorPart[], other: [] as CreatorPart[] }
-  for (const p of parts) buckets[categorizePart(p)].push(p)
-  // Sub-group body/armor by bone region using the bone categorizer.
-  const bySection = (list: CreatorPart[]) => {
-    const groups: Record<string, CreatorPart[]> = {}
-    for (const p of list) {
-      const region = categorize([p.boneName])[0]?.name ?? 'Other'
-      ;(groups[region] ||= []).push(p)
-    }
-    // Preserve a stable order matching how the bone groups are usually listed.
-    const order = ['Torso', 'Left Arm', 'Right Arm', 'Left Leg', 'Right Leg', 'IK Helpers', 'Other']
-    return order.filter((r) => groups[r]?.length).map((r) => ({ name: r, parts: groups[r] }))
-  }
-  const render = (p: CreatorPart) => (
-    <PartRow key={p.id} part={p} bones={bones} onChange={onChange} />
-  )
+function SlotToggleRow({
+  label, on, onChange,
+}: { label: string; on: boolean; onChange: (on: boolean) => void }) {
   return (
-    <div>
-      {buckets.body.length > 0 ? (
-        <>
-          <div style={partSectionHeaderStyle}>▸ Body</div>
-          {bySection(buckets.body).map((g) => (
-            <div key={`body-${g.name}`}>
-              <div style={partSubsectionHeaderStyle}>{`   ▸ ${g.name}`}</div>
-              {g.parts.map(render)}
-            </div>
-          ))}
-        </>
-      ) : null}
-      {buckets.armor.length > 0 ? (
-        <>
-          <div style={partSectionHeaderStyle}>▸ Armor</div>
-          {bySection(buckets.armor).map((g) => (
-            <div key={`armor-${g.name}`}>
-              <div style={partSubsectionHeaderStyle}>{`   ▸ ${g.name}`}</div>
-              {g.parts.map(render)}
-            </div>
-          ))}
-        </>
-      ) : null}
-      {buckets.weapon.length > 0 ? (
-        <>
-          <div style={partSectionHeaderStyle}>▸ Weapons</div>
-          {buckets.weapon.map(render)}
-        </>
-      ) : null}
-      {buckets.other.length > 0 ? (
-        <>
-          <div style={partSectionHeaderStyle}>▸ Other (legacy)</div>
-          {buckets.other.map(render)}
-        </>
-      ) : null}
-    </div>
+    <label style={slotRowStyle}>
+      <span style={slotLabelStyle}>{label}</span>
+      <input
+        type="checkbox"
+        checked={on}
+        onChange={(e) => onChange(e.target.checked)}
+        style={slotCheckboxStyle}
+      />
+      <span style={slotStatusStyle}>{on ? 'on' : 'off'}</span>
+    </label>
   )
 }
 
-function PartRow({ part, bones, onChange }: { part: CreatorPart; bones: string[]; onChange: () => void }) {
-  const [expanded, setExpanded] = useState(false)
-  const update = (patch: Partial<CreatorPart>) => {
-    ;(window as any).__editor?.updateCreatorPart?.(part.id, patch)
-    onChange()
-  }
-  const del = () => {
-    ;(window as any).__editor?.deleteCreatorPart?.(part.id)
-    onChange()
-  }
-  // Scale shown in centimetres for consistency with offset.
-  const sx = part.scale[0] * 100
-  const sy = part.scale[1] * 100
-  const sz = part.scale[2] * 100
-  const ox = part.offset[0] * 100
-  const oy = part.offset[1] * 100
-  const oz = part.offset[2] * 100
-
-  // Bone list includes the part's current bone even if it's not in
-  // ACTIVE_BONES (e.g. legacy data), so the dropdown stays selectable.
-  const dropdownBones = bones.includes(part.boneName) ? bones : [part.boneName, ...bones]
-
-  return (
-    <div style={partRowStyle}>
-      {/* Card header — chevron + bone dropdown + delete. The category
-          (Body / Armor / Weapons) is shown by the section header above
-          the card, so the card itself only carries the bone identity. */}
-      <div style={partHeaderRow1Style}>
-        <span
-          style={partChevronStyle}
-          onClick={() => setExpanded((v) => !v)}
-          title={expanded ? 'Collapse' : 'Expand'}
-        >
-          {expanded ? '▼' : '▶'}
-        </span>
-        <select
-          value={part.boneName}
-          onChange={(e) => update({ boneName: e.target.value })}
-          style={{ ...creatorSelectStyle, flex: '1 1 100%' }}
-          title="Attach to bone"
-        >
-          {dropdownBones.map((b) => (
-            <option key={b} value={b} style={{ background: '#1c1f24', color: '#fff' }}>
-              {b}
-            </option>
-          ))}
-        </select>
-        <span style={partDelStyle} onClick={del} title="Delete">×</span>
-      </div>
-      {/* Accordion body — size / offset / rotation / color. */}
-      {expanded ? (
-        <>
-          <PartTripleRow
-            label={part.shape === 'clone' ? 'size %' : 'size'}
-            x={sx} y={sy} z={sz}
-            onSet={(axis, cm) => {
-              const next: [number, number, number] = [...part.scale]
-              next[axis] = Math.max(0.5, cm) / 100
-              update({ scale: next })
-            }}
-          />
-          <PartTripleRow
-            label="offset"
-            x={ox} y={oy} z={oz}
-            onSet={(axis, cm) => {
-              const next: [number, number, number] = [...part.offset]
-              next[axis] = cm / 100
-              update({ offset: next })
-            }}
-          />
-          <PartTripleRow
-            label="rot°"
-            x={part.rotation[0]} y={part.rotation[1]} z={part.rotation[2]}
-            onSet={(axis, deg) => {
-              const next: [number, number, number] = [...part.rotation]
-              next[axis] = deg
-              update({ rotation: next })
-            }}
-          />
-          <div style={partColorRowStyle}>
-            <span style={{ fontSize: 10, opacity: 0.55, width: 38 }}>color</span>
-            <input
-              type="color"
-              value={part.color}
-              onChange={(e) => update({ color: e.target.value })}
-              style={partSwatchStyle}
-            />
-            <span style={{ fontFamily: 'monospace', fontSize: 9, opacity: 0.45 }}>
-              {part.color.toUpperCase()}
-            </span>
-          </div>
-        </>
-      ) : null}
-    </div>
-  )
-}
-
-function PartTripleRow({
-  label, x, y, z, onSet,
+function SlotSelectRow({
+  label, value, options, onChange,
 }: {
   label: string
-  x: number; y: number; z: number
-  onSet: (axis: 0 | 1 | 2, value: number) => void
+  value: string
+  options: Array<{ value: string; label: string }>
+  onChange: (v: string) => void
 }) {
-  const fmt = (n: number) => Number.isInteger(n) ? `${n}` : n.toFixed(1)
   return (
-    <div style={partTripleRowStyle}>
-      <span style={{ fontSize: 10, opacity: 0.55, width: 38 }}>{label}</span>
-      <span style={partAxisLabelStyle}>X</span>
-      <PartNumInput value={fmt(x)} onCommit={(v) => onSet(0, v)} />
-      <span style={partAxisLabelStyle}>Y</span>
-      <PartNumInput value={fmt(y)} onCommit={(v) => onSet(1, v)} />
-      <span style={partAxisLabelStyle}>Z</span>
-      <PartNumInput value={fmt(z)} onCommit={(v) => onSet(2, v)} />
-    </div>
-  )
-}
-
-function PartNumInput({
-  value, onCommit,
-}: { value: string; onCommit: (v: number) => void }) {
-  const [text, setText] = useState(value)
-  const [focused, setFocused] = useState(false)
-  useEffect(() => { if (!focused) setText(value) }, [value, focused])
-  return (
-    <input
-      type="text"
-      inputMode="decimal"
-      value={text}
-      onChange={(e) => setText(e.target.value)}
-      onFocus={(e) => { setFocused(true); e.target.select() }}
-      onBlur={() => {
-        setFocused(false)
-        const n = parseFloat(text)
-        if (Number.isFinite(n)) onCommit(n)
-        else setText(value)
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-        if (e.key === 'Escape') { setText(value); (e.target as HTMLInputElement).blur() }
-      }}
-      style={partNumInputStyle}
-    />
+    <label style={slotRowStyle}>
+      <span style={slotLabelStyle}>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={slotSelectStyle}
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value} style={{ background: '#1c1f24', color: '#fff' }}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }
 
@@ -1417,179 +1125,38 @@ const resetBtnStyle: CSSProperties = {
   letterSpacing: 0.3,
 }
 
-
-
-const creatorAddRowStyle: CSSProperties = {
+const slotRowStyle: CSSProperties = {
   display: 'flex',
-  gap: 6,
-  marginBottom: 10,
   alignItems: 'center',
-  flexWrap: 'wrap',     // wrap to next line if panel is narrow
-  minWidth: 0,
-}
-const creatorSelectStyle: CSSProperties = {
-  flex: '1 1 80px',     // share space, shrink below content width when needed
-  minWidth: 0,
-  maxWidth: '100%',
-  background: 'rgba(255, 255, 255, 0.07)',
-  color: '#fff',
-  border: '1px solid rgba(255, 255, 255, 0.18)',
-  borderRadius: 3,
-  padding: '4px 6px',
-  fontFamily: 'inherit',
-  fontSize: 11,
-  outline: 'none',
-}
-const creatorAddBtnStyle: CSSProperties = {
-  flex: '0 0 auto',     // fixed width — never gets pushed off the row
-  background: 'rgba(95, 130, 200, 0.55)',
-  color: '#fff',
-  border: '1px solid rgba(255, 255, 255, 0.15)',
-  borderRadius: 4,
-  padding: '6px 10px',
-  fontSize: 11,
-  fontFamily: 'inherit',
-  fontWeight: 500,
+  gap: 8,
+  padding: '8px 6px',
+  borderBottom: '1px solid rgba(255,255,255,0.06)',
   cursor: 'pointer',
 }
-// Tree-style category headers inside the dropdown. Native <optgroup>
-// labels use the OS theme and don't pick up dark-mode colours, so we
-// build the visual hierarchy from regular <option> rows: 3 styles =
-// 3 levels of nesting (category > subcategory > item).
-const creatorCategoryStyle: CSSProperties = {
-  background: '#0a0c0f',
-  color: '#cbd5e1',
-  fontSize: 11,
-  fontWeight: 700,
-  letterSpacing: 0.6,
+const slotLabelStyle: CSSProperties = {
+  flex: '0 0 96px',
+  fontSize: 12,
+  letterSpacing: 0.2,
 }
-const creatorSubcategoryStyle: CSSProperties = {
-  background: '#13161b',
-  color: '#94a3b8',
+const slotCheckboxStyle: CSSProperties = {
+  width: 16,
+  height: 16,
+  cursor: 'pointer',
+}
+const slotStatusStyle: CSSProperties = {
   fontSize: 10,
-  fontWeight: 600,
+  opacity: 0.55,
+  fontFamily: 'monospace',
+  textTransform: 'uppercase',
 }
-const creatorItemStyle: CSSProperties = {
+const slotSelectStyle: CSSProperties = {
+  flex: '1 1 100%',
   background: '#1c1f24',
   color: '#fff',
+  border: '1px solid rgba(255,255,255,0.15)',
+  borderRadius: 3,
   fontSize: 11,
+  padding: '4px 6px',
+  fontFamily: 'inherit',
 }
-// Section headers inside the parts list — mirror the Add-dropdown's
-// 3-level visual hierarchy (category / subcategory / item) so the
-// authored components feel like the same taxonomy the user picks from.
-const partSectionHeaderStyle: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 700,
-  color: '#cbd5e1',
-  letterSpacing: 0.6,
-  marginTop: 8,
-  marginBottom: 3,
-  padding: '2px 4px',
-  background: '#0a0c0f',
-  borderRadius: 3,
-}
-const partSubsectionHeaderStyle: CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: '#94a3b8',
-  margin: '3px 0 2px 0',
-  padding: '1px 4px',
-}
-const partRowStyle: CSSProperties = {
-  background: 'rgba(255, 255, 255, 0.04)',
-  border: '1px solid rgba(255, 255, 255, 0.08)',
-  borderRadius: 4,
-  padding: '6px 8px',
-  marginBottom: 6,
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 3,
-}
-const partHeaderRow1Style: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  minWidth: 0,
-  marginBottom: 2,
-}
-const partChevronStyle: CSSProperties = {
-  cursor: 'pointer',
-  fontSize: 9,
-  opacity: 0.65,
-  width: 12,
-  textAlign: 'center',
-  userSelect: 'none',
-  flexShrink: 0,
-}
-const partTitleStyle: CSSProperties = {
-  cursor: 'pointer',
-  fontSize: 12,
-  fontWeight: 600,
-  flex: 1,
-  minWidth: 0,
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-}
-const partHeaderRow2Style: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  minWidth: 0,
-  marginBottom: 4,
-}
-const partBoneLabelStyle: CSSProperties = {
-  fontSize: 10,
-  opacity: 0.55,
-  width: 30,
-  flexShrink: 0,
-}
-const partDelStyle: CSSProperties = {
-  cursor: 'pointer',
-  opacity: 0.5,
-  fontWeight: 700,
-  padding: '0 4px',
-  flexShrink: 0,
-}
-const partTripleRowStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 3,
-}
-const partAxisLabelStyle: CSSProperties = {
-  fontSize: 9,
-  opacity: 0.55,
-  fontWeight: 700,
-  width: 8,
-  textAlign: 'center',
-  flexShrink: 0,
-}
-const partNumInputStyle: CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  background: 'rgba(255, 255, 255, 0.07)',
-  color: '#fff',
-  border: '1px solid rgba(255, 255, 255, 0.18)',
-  borderRadius: 3,
-  padding: '2px 4px',
-  fontFamily: 'monospace',
-  fontSize: 10,
-  outline: 'none',
-  textAlign: 'right',
-}
-const partColorRowStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  marginTop: 2,
-}
-const partSwatchStyle: CSSProperties = {
-  width: 28,
-  height: 18,
-  padding: 0,
-  border: '1px solid rgba(255, 255, 255, 0.25)',
-  borderRadius: 3,
-  background: 'transparent',
-  cursor: 'pointer',
-  flexShrink: 0,
-}
+

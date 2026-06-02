@@ -1438,6 +1438,13 @@
       ]
     }
   ],
-  "creatorParts": [],
+  "customSlots": {
+    "body": "body",
+    "helmet": "helmet",
+    "bodyArmor": "platebody",
+    "legArmor": "platelegs",
+    "rightHand": "sword",
+    "leftHand": "shield"
+  },
   "schemaVersion": 2
 }

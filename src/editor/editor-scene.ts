@@ -2,8 +2,6 @@ import '@babylonjs/loaders/glTF'
 import {
   AbstractMesh,
   Color3,
-  Material,
-  Matrix,
   Mesh,
   Scene,
   SceneLoader,
@@ -22,9 +20,9 @@ import { POSITION_BONES } from './pose-store'
 // orient that local axis to face the other model.)
 const MODEL1_POSITION = new Vector3(50.0, 0, 0)
 const MODEL2_POSITION = new Vector3(51.5, 0, 0)   // 1.5m gap
-// Model 3 ("Custom") — character-creator target. Skeleton-only knight
-// (all GLB meshes hidden) so the user builds the body part-by-part by
-// attaching geometric primitives via the Creator tab.
+// Model 3 ("Custom") — character-creator target. Loads the v3 GLB with
+// every mesh hidden up front; the Creator tab makes them visible per
+// slot (default = full kit, matching Model 1/2).
 const MODEL3_POSITION = new Vector3(53.0, 0, 0)   // 1.5m from Model 2
 const MODEL1_YROT = -Math.PI / 2     // local -Z → +X (faces Model 2)
 const MODEL2_YROT =  Math.PI / 2     // local -Z → -X (faces Model 1)
@@ -36,12 +34,6 @@ const MODEL3_YROT = -Math.PI / 2     // faces +X (same as Model 1)
 //   Arms       — Upper Arm / Lower Arm / Hand
 //   Legs       — Upper Leg / Lower Leg / Foot
 // Skipped: Fingers, Thumbs, Hand Hold (weapon attach), Toes, IK helpers.
-// Knight mesh layers (probed from knight.glb). Used by the Creator's
-// bone-clone path to filter source triangles so "Body" extracts skin +
-// cloth and "Armor" extracts only the metal pieces.
-export const BODY_MESH_STEMS: readonly string[] = ['Body', 'Hair', 'Shirt', 'Pants', 'Shoes']
-export const ARMOR_MESH_STEMS: readonly string[] = ['Helmet', 'Platebody', 'Platelegs']
-
 export const ACTIVE_BONES: readonly string[] = [
   'Hips',
   'Spine',
@@ -85,55 +77,49 @@ const FALLBACK = new Color3(0.55, 0.55, 0.55)
 
 // One knight instance — has its own root, skeleton(s), rest data, and meshes.
 // Anchors / animations are applied per-instance via the engine's active-model
-// selector. Materials are shared via a single matCache passed in (so both
-// instances render with the same colors and the Style panel affects both).
-// One Creator part — a geometric primitive parented to a bone on the
-// Custom model. Author by adding/resizing via the Creator tab.
-// 'clone' = mimic the actual mesh geometry on a Model 1 bone (triangles
-// extracted by skinning weights, baked into bone-local space, then
-// re-parented to the Custom model's same-named bone). All other shapes
-// are procedural primitives.
-export type CreatorShape = 'sphere' | 'box' | 'cylinder' | 'capsule' | 'clone'
-export type CreatorPart = {
-  id: string
-  boneName: string                   // bone the part is attached to on Custom
-  shape: CreatorShape
-  scale: [number, number, number]    // dimensions in metres (in bone-local frame)
-  offset: [number, number, number]   // local position relative to bone
-  rotation: [number, number, number] // Euler degrees (X, Y, Z)
-  color: string                      // hex #rrggbb
-  // When set, this part clones a NON-skinned prop mesh (e.g. sword,
-  // shield) from the source model by name, rather than extracting
-  // skinned geometry by bone. boneName is still required — used as the
-  // attachment point on Custom (typically the prop's parent bone in source).
-  sourceMeshName?: string
-  // When set, this part is a GROUP — one TransformNode parented to bone,
-  // with N child meshes (one per listed source-mesh name) nested under it.
-  // Transform/color edits apply to the whole group. Used for multi-primitive
-  // props like a sword (blade + grip + pommel + crossguard).
-  groupMeshNames?: string[]
-  // Mesh-stem allowlist for skinned bone extraction. When set, only
-  // triangles from source meshes whose name-stem is in this list count
-  // towards the clone — e.g. ['Helmet', 'Platebody', 'Platelegs'] for
-  // armour-only clones, ['Body', 'Hair', 'Shirt', 'Pants', 'Shoes'] for
-  // body/cloth clones. Without it, all skinned source meshes contribute.
-  meshFilter?: string[]
+// selector. Materials are per-instance so the Style panel edits each
+// independently. Custom (Model 3) also carries `customSlots` + tracks any
+// library-weapon attachments via `libraryAttachments` for clean disposal.
+
+// Character Creator slots — the Custom knight is a remix of the same v3
+// GLB Model 1/2 load, with each piece toggleable via slot selection. Slot
+// values that start with `library:` mean a weapon from `WEAPON_CATALOGUE`
+// is attached to the corresponding Hand Hold bone instead of the native
+// in-skeleton sword/shield mesh.
+export type CustomSlots = {
+  body: 'none' | 'body'
+  helmet: 'none' | 'helmet'
+  bodyArmor: 'none' | 'platebody'
+  legArmor: 'none' | 'platelegs'
+  rightHand: 'none' | 'sword' | `library:${string}`
+  leftHand: 'none' | 'shield' | `library:${string}`
 }
 
-// Runtime state for one creator part: data + the Babylon objects it owns.
-// Each part owns its own material (NOT shared) so its color is independent.
-//
-// For group parts, `mesh` is a transform-node-shaped Mesh (no geometry) used
-// as the shared parent; `material` is the first child's material. The full
-// child list lives in `groupChildren` so disposal + color updates can iterate.
-export type CreatorPartInstance = {
-  data: CreatorPart
-  mesh: Mesh
-  // Material may be StandardMaterial (primitives + flat clones) OR a
-  // PBRMaterial clone (textured-prop clones that need to keep the
-  // source's albedoTexture, metallic/roughness, normal map, etc).
-  material: Material
-  groupChildren?: Array<{ mesh: Mesh; material: Material }>
+export const DEFAULT_CUSTOM_SLOTS: CustomSlots = {
+  body: 'body',
+  helmet: 'helmet',
+  bodyArmor: 'platebody',
+  legArmor: 'platelegs',
+  rightHand: 'sword',
+  leftHand: 'shield',
+}
+
+// Map slot → mesh-name stem on the v3 GLB. Toggling a slot off hides every
+// mesh on Custom whose `name.split('_primitive')[0]` matches the stem.
+export const SLOT_NATIVE_STEM: Record<keyof CustomSlots, string | null> = {
+  body: 'Body',
+  helmet: 'Helmet',
+  bodyArmor: 'Platebody',
+  legArmor: 'Platelegs',
+  rightHand: 'Sword',
+  leftHand: 'Shield',
+}
+
+// Bone each weapon-library attachment lands on. Right hand → Hand Hold.R,
+// left hand → Hand Hold.L. Used by `setCustomSlot` to attach library weapons.
+export const SLOT_HAND_BONE: Partial<Record<keyof CustomSlots, string>> = {
+  rightHand: 'Hand Hold.R',
+  leftHand: 'Hand Hold.L',
 }
 
 export type ModelInstance = {
@@ -150,14 +136,13 @@ export type ModelInstance = {
   restPose: Record<string, [number, number, number, number]>
   restPositions: Record<string, [number, number, number]>
   restWorldPositions: Record<string, [number, number, number]>
-  // Snapshotted at load (before any user pose). Used by the Creator's
-  // 'clone' shape to express Model 1's skinned vertices in bone-local
-  // space at rest. Keyed by bone name / mesh uniqueId respectively.
-  restBoneWorldMatrices: Map<string, Matrix>
-  restMeshWorldMatrices: Map<number, Matrix>
   position: Vector3            // initial world position (for Reset)
-  // Map<partId, instance> — only populated on the Custom model.
-  creatorParts: Map<string, CreatorPartInstance>
+  // Character Creator state — populated only on the Custom model.
+  customSlots?: CustomSlots
+  // Currently-attached library-weapon group meshes per hand slot. Lets
+  // the slot setter dispose the prior attachment before swapping or
+  // reverting to the native sword/shield. Custom only.
+  libraryAttachments?: Map<'rightHand' | 'leftHand', Mesh>
 }
 
 // Weapon library — GLB props loaded from public/models/weapons/. Each
@@ -268,8 +253,6 @@ async function loadKnightInstance(
   const restPose: Record<string, [number, number, number, number]> = {}
   const restPositions: Record<string, [number, number, number]> = {}
   const restWorldPositions: Record<string, [number, number, number]> = {}
-  const restBoneWorldMatrices = new Map<string, Matrix>()
-  const restMeshWorldMatrices = new Map<number, Matrix>()
   root.computeWorldMatrix(true)
   for (const bone of skeleton.bones) {
     const node = bone._linkedTransformNode
@@ -278,20 +261,12 @@ async function loadKnightInstance(
       node.rotationQuaternion ?? node.rotation.toQuaternion()
     const q = node.rotationQuaternion
     restPose[bone.name] = [q.x, q.y, q.z, q.w]
-    node.computeWorldMatrix(true)
-    restBoneWorldMatrices.set(bone.name, node.getWorldMatrix().clone())
     if (POSITION_BONES.includes(bone.name)) {
       const p = node.position
       restPositions[bone.name] = [p.x, p.y, p.z]
       const wp = node.getAbsolutePosition()
       restWorldPositions[bone.name] = [wp.x, wp.y, wp.z]
     }
-  }
-  // Capture every loaded mesh's world matrix at rest — Creator's 'clone'
-  // shape needs to convert mesh-local vertex positions → world → bone-local.
-  for (const m of result.meshes) {
-    m.computeWorldMatrix(true)
-    restMeshWorldMatrices.set(m.uniqueId, m.getWorldMatrix().clone())
   }
 
   return {
@@ -304,10 +279,10 @@ async function loadKnightInstance(
     restPose,
     restPositions,
     restWorldPositions,
-    restBoneWorldMatrices,
-    restMeshWorldMatrices,
     position: position.clone(),
-    creatorParts: new Map<string, CreatorPartInstance>(),
+    // Custom-only slot state; left undefined on Model 1/2.
+    customSlots: name === 'Custom' ? { ...DEFAULT_CUSTOM_SLOTS } : undefined,
+    libraryAttachments: name === 'Custom' ? new Map() : undefined,
   }
 }
 
@@ -318,8 +293,9 @@ export async function createEditorScene(scene: Scene): Promise<EditorSceneApi | 
     // Model 1, Custom, or any other model spawned later.
     const m1 = await loadKnightInstance(scene, 'Model 1', MODEL1_POSITION, MODEL1_YROT)
     const m2 = await loadKnightInstance(scene, 'Model 2', MODEL2_POSITION, MODEL2_YROT)
-    // Custom (Model 3): skeleton-only — meshes hidden so user builds from
-    // primitives via the Creator tab.
+    // Custom (Model 3): loads the same v3 GLB as Model 1/2 with every mesh
+    // hidden up front. The Creator tab toggles slot meshes back on per the
+    // user's slot selections (default = full kit, matching Model 1/2).
     const m3 = await loadKnightInstance(scene, 'Custom', MODEL3_POSITION, MODEL3_YROT, true)
 
     // The first load also brings in animationGroups (baked anims). Both
@@ -709,4 +685,24 @@ export function attachWeaponToHand(
     rotationDeg[2] * DEG,
   )
   return groupRoot
+}
+
+// Flip `isVisible` on every Mesh on `model` whose name stem matches
+// `stem` (Babylon's GLB loader names multi-primitive meshes
+// "<stem>_primitive<N>"). Used by the Custom slot toggles — making a
+// slot off hides all primitives of that piece, making it on shows
+// them all. No-op for meshes that don't match.
+export function setCustomMeshVisibleByStem(
+  model: ModelInstance,
+  stem: string,
+  visible: boolean,
+): void {
+  for (const m of model.glbMeshes) {
+    if (!(m instanceof Mesh)) continue
+    if (m.getTotalVertices() === 0) continue
+    const meshStem = m.name.split('_primitive')[0]
+    if (meshStem === stem) {
+      m.isVisible = visible
+    }
+  }
 }

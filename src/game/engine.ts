@@ -17,14 +17,17 @@ import { createTrees } from './scene/trees'
 import { createBuildings } from './scene/buildings'
 import { createOpponent } from './characters/opponent'
 import { createHero } from './characters/hero'
-import { ACTIVE_BONES, createEditorScene, loadWeaponLibrary } from '../editor/editor-scene'
-import type { CreatorPart, CreatorShape } from '../editor/editor-scene'
 import {
-  createPartMesh,
-  defaultPartFor,
-  disposePartMesh,
-  updatePartMesh,
-} from '../editor/creator-parts'
+  ACTIVE_BONES,
+  attachWeaponToHand,
+  createEditorScene,
+  DEFAULT_CUSTOM_SLOTS,
+  loadWeaponLibrary,
+  setCustomMeshVisibleByStem,
+  SLOT_HAND_BONE,
+  SLOT_NATIVE_STEM,
+} from '../editor/editor-scene'
+import type { CustomSlots } from '../editor/editor-scene'
 import { createBonePicker } from '../editor/bone-picker'
 import { createEditorGizmo } from '../editor/gizmo'
 import { applyPose, snapshotPose, POSITION_BONES } from '../editor/pose-store'
@@ -280,18 +283,73 @@ export function createEngine(
     let activeIdx = 0
     const active = () => ed.models[activeIdx]
 
-    // Creator parts revision — bumped on every mutation so React (or any
-    // observer) can detect changes and persist. Pull-based (no events).
-    let creatorPartsRev = 0
-    const creatorPartsListeners: Array<() => void> = []
+    // Custom-slot revision — bumped on every Creator slot mutation so
+    // React (or any observer) can detect changes and persist.
+    let customSlotsRev = 0
+    const customSlotsListeners: Array<() => void> = []
     const modelsChangeListeners: Array<() => void> = []
     // Tracks which model the editor camera is currently focused on.
     // -1 = no explicit focus (initial state, target at the static centre).
     let focusedModelIdx = -1
     const focusChangeListeners: Array<() => void> = []
-    const bumpCreatorParts = () => {
-      creatorPartsRev++
-      for (const l of creatorPartsListeners) l()
+    const bumpCustomSlots = () => {
+      customSlotsRev++
+      for (const l of customSlotsListeners) l()
+    }
+
+    // Apply one Custom slot change. body/helmet/bodyArmor/legArmor toggle
+    // mesh visibility on the native stem. rightHand/leftHand also support
+    // 'library:<stem>' values — those hide the native mesh AND attach a
+    // weapon-library entry to the Hand Hold bone (disposing any prior
+    // library attachment first so toggling doesn't leak orphan meshes).
+    const applySlotToCustom = (
+      customModel: typeof ed.models[number],
+      slot: keyof CustomSlots,
+      value: string,
+    ): void => {
+      const nativeStem = SLOT_NATIVE_STEM[slot]
+      const handBone = SLOT_HAND_BONE[slot]
+      if (!nativeStem) return
+      const isHandSlot = handBone != null
+
+      // Dispose any existing library attachment for hand slots so we
+      // start from a known state on every set.
+      if (isHandSlot && customModel.libraryAttachments) {
+        const prior = customModel.libraryAttachments.get(slot as 'rightHand' | 'leftHand')
+        if (prior) {
+          for (const child of prior.getChildMeshes(true)) child.dispose()
+          prior.dispose()
+          customModel.libraryAttachments.delete(slot as 'rightHand' | 'leftHand')
+        }
+      }
+
+      if (value === 'none') {
+        setCustomMeshVisibleByStem(customModel, nativeStem, false)
+        return
+      }
+
+      if (value.startsWith('library:')) {
+        if (!isHandSlot || !handBone) return  // library only valid on hand slots
+        const stem = value.slice('library:'.length)
+        // Hide the native sword/shield mesh; library weapon takes its place.
+        setCustomMeshVisibleByStem(customModel, nativeStem, false)
+        const group = attachWeaponToHand(
+          scene,
+          ed.weaponLibrary ?? [],
+          stem,
+          customModel.glbMeshes,
+          customModel.skeleton,
+          handBone,
+          [90, 90, 30],
+        )
+        if (group && customModel.libraryAttachments) {
+          customModel.libraryAttachments.set(slot as 'rightHand' | 'leftHand', group)
+        }
+        return
+      }
+
+      // Native value (e.g. 'body', 'sword') → just show the native mesh.
+      setCustomMeshVisibleByStem(customModel, nativeStem, true)
     }
 
     bonePicker = createBonePicker(scene, active().skeleton, ACTIVE_BONES)
@@ -923,20 +981,13 @@ export function createEngine(
       // Two follow-up toggles:
       //  1. Bone-picker spheres are scene-level (not parented to model
       //     root) so setEnabled on root alone leaves them floating.
-      //  2. Skinned-clone creator parts are parented to a Bone via
-      //     attachToBone — they're NOT in the model-root TransformNode
-      //     hierarchy and don't inherit setEnabled. Toggle each part's
-      //     mesh + groupChildren directly.
+      //  2. Library-weapon attachments on Custom live under the bone
+      //     hierarchy (parented to the Hand Hold TransformNode), so they
+      //     inherit setEnabled from the root.
       setModelVisible: (idx: number, visible: boolean) => {
         if (idx < 0 || idx >= ed.models.length) return
         const m = ed.models[idx]
         m.root.setEnabled(visible)
-        for (const inst of m.creatorParts.values()) {
-          inst.mesh.setEnabled(visible)
-          if (inst.groupChildren) {
-            for (const c of inst.groupChildren) c.mesh.setEnabled(visible)
-          }
-        }
         if (idx === activeIdx && bonePicker) {
           bonePicker.setActive(visible && cameraMode === 'editor')
         }
@@ -947,264 +998,65 @@ export function createEngine(
       },
 
       // ─── Character Creator (Model 3 / Custom) ────────────────────
-      // Add a geometric primitive (or geometry clone) to a bone on the
-      // Custom model. Returns the new part's id (or null if the bone
-      // wasn't found / Custom model not loaded). Gated to Custom (idx 2).
-      // For shape='clone', Model 1 is used as the geometry source.
-      addCreatorPart: (shape: CreatorShape, boneName: string, meshFilter?: string[]): string | null => {
+      // Slot-based wardrobe. Custom is a clone of the v3 GLB with every
+      // mesh hidden up front; each slot picks one option and the engine
+      // flips mesh visibility (or attaches a library weapon) to match.
+      getCustomSlots: (): CustomSlots => {
         const customIdx = 2
-        if (customIdx >= ed.models.length) return null
-        const customModel = ed.models[customIdx]
-        // Validate the bone exists on the Custom rig before constructing
-        // the part — saves the rest of the pipeline from a sentinel value.
-        if (!customModel.skeleton.bones.find((b) => b.name === boneName)) return null
-        const part = defaultPartFor(boneName, shape)
-        if (meshFilter && meshFilter.length > 0) part.meshFilter = meshFilter
-        const inst = createPartMesh(scene, part, customModel, ed.models[0])
-        customModel.creatorParts.set(part.id, inst)
-        bumpCreatorParts()
-        return part.id
-      },
-
-      // Add a prop clone (non-skinned mesh — sword, shield, etc.) by source
-      // mesh name. Engine auto-resolves the attachment bone by walking the
-      // source mesh's parent chain to find the nearest bone TransformNode.
-      addCreatorPropClone: (sourceMeshName: string): string | null => {
-        const customIdx = 2
-        if (customIdx >= ed.models.length) return null
-        const customModel = ed.models[customIdx]
-        const sourceModel = ed.models[0]
-        // Find the source mesh
-        const srcMesh = sourceModel.glbMeshes.find(
-          (m: any) => m.name === sourceMeshName && m.getTotalVertices?.() > 0,
-        )
-        if (!srcMesh) {
-          console.warn(`[creator] prop '${sourceMeshName}' not found on source model`)
-          return null
-        }
-        // Walk parent chain to find a bone-linked TransformNode.
-        const boneLinkedNodes = new Map<any, string>()
-        for (const b of sourceModel.skeleton.bones) {
-          if (b._linkedTransformNode) boneLinkedNodes.set(b._linkedTransformNode, b.name)
-        }
-        let cursor: any = srcMesh.parent
-        let boneName: string | null = null
-        while (cursor) {
-          if (boneLinkedNodes.has(cursor)) {
-            boneName = boneLinkedNodes.get(cursor)!
-            break
-          }
-          cursor = cursor.parent
-        }
-        if (!boneName) {
-          console.warn(`[creator] prop '${sourceMeshName}' has no bone ancestor`)
-          return null
-        }
-        const part = defaultPartFor(boneName, 'clone' as CreatorShape)
-        part.sourceMeshName = sourceMeshName
-        const inst = createPartMesh(scene, part, customModel, sourceModel)
-        customModel.creatorParts.set(part.id, inst)
-        bumpCreatorParts()
-        return part.id
-      },
-
-      // Enumerate available clone targets — all bones + non-skinned
-      // renderable prop meshes + weapon-library items. Props are grouped
-      // by name stem so a multi-primitive prop surfaces as one entry.
-      // `weapons` items come from /public/models/weapons/ — separate
-      // from Model 1's `props` so the UI can show them in their own
-      // category.
-      getCreatorTargets: (): {
-        bones: string[]
-        props: Array<{ stem: string; members: string[] }>
-        weapons: Array<{ stem: string; members: string[]; kind: string }>
-      } => {
-        const sourceModel = ed.models[0]
-        const bones = sourceModel.skeleton.bones.map((b) => b.name)
-        // Collect all non-skinned, renderable, non-root meshes.
-        const raw: string[] = []
-        const seen = new Set<string>()
-        for (const m of sourceModel.glbMeshes as any[]) {
-          if (!m || m.skeleton) continue
-          if (!m.getTotalVertices || m.getTotalVertices() === 0) continue
-          if (m.name === '__root__' || m.name === 'Armature') continue
-          if (seen.has(m.name)) continue
-          seen.add(m.name)
-          raw.push(m.name)
-        }
-        // Group by stem. Babylon's GLB loader names multi-material
-        // primitives "<stem>_primitive<N>" — split on that. For meshes
-        // without the suffix, the stem IS the name (single-primitive prop).
-        const byStem = new Map<string, string[]>()
-        for (const name of raw) {
-          const m = name.match(/^(.*)_primitive\d+$/)
-          const stem = m ? m[1] : name
-          if (!byStem.has(stem)) byStem.set(stem, [])
-          byStem.get(stem)!.push(name)
-        }
-        const props = Array.from(byStem.entries()).map(([stem, members]) => ({ stem, members }))
-        // Weapon library — separate enumeration. Each entry already has a
-        // resolved stem + member mesh list at scene-init time.
-        const weapons = (ed.weaponLibrary ?? []).map((w) => ({
-          stem: w.stem,
-          members: w.meshes.map((m) => m.name),
-          kind: w.kind,
-        }))
-        return { bones, props, weapons }
-      },
-
-      // Add a multi-primitive prop as ONE group part. All children share
-      // the group root's transform — rotating/scaling moves them together.
-      // Bone is auto-resolved from the first child's parent chain.
-      addCreatorPropGroupClone: (stem: string, memberNames: string[]): string | null => {
-        const customIdx = 2
-        if (customIdx >= ed.models.length) return null
-        const customModel = ed.models[customIdx]
-        const sourceModel = ed.models[0]
-        if (memberNames.length === 0) return null
-        // Resolve bone from first child (all members share a parent in
-        // a well-formed GLB; if they don't, the first one anchors).
-        const first = sourceModel.glbMeshes.find(
-          (m: any) => m.name === memberNames[0] && m.getTotalVertices?.() > 0,
-        )
-        if (!first) return null
-        const boneLinkedNodes = new Map<any, string>()
-        for (const b of sourceModel.skeleton.bones) {
-          if (b._linkedTransformNode) boneLinkedNodes.set(b._linkedTransformNode, b.name)
-        }
-        let cursor: any = first.parent
-        let boneName: string | null = null
-        while (cursor) {
-          if (boneLinkedNodes.has(cursor)) {
-            boneName = boneLinkedNodes.get(cursor)!
-            break
-          }
-          cursor = cursor.parent
-        }
-        if (!boneName) {
-          console.warn(`[creator] prop group '${stem}' has no bone ancestor`)
-          return null
-        }
-        const part = defaultPartFor(boneName, 'clone' as CreatorShape)
-        part.groupMeshNames = memberNames
-        // Store the stem in sourceMeshName too so the UI can label it.
-        part.sourceMeshName = stem
-        const inst = createPartMesh(scene, part, customModel, sourceModel)
-        customModel.creatorParts.set(part.id, inst)
-        bumpCreatorParts()
-        return part.id
-      },
-
-      // Add a weapon-library item as a Creator clone. Defaults attach
-      // bone to Hand Hold.R (right hand) — user can re-target after add.
-      // Treats every weapon as a "group" regardless of primitive count
-      // so the stem (e.g. "copper_axe") shows in the part label rather
-      // than the raw mesh name.
-      addCreatorWeaponClone: (stem: string, memberNames: string[], targetBone?: string): string | null => {
-        const customIdx = 2
-        if (customIdx >= ed.models.length) return null
-        const customModel = ed.models[customIdx]
-        const sourceModel = ed.models[0]
-        const entry = ed.weaponLibrary?.find((w) => w.stem === stem)
-        if (!entry) {
-          console.warn(`[creator] weapon '${stem}' not found in library`)
-          return null
-        }
-        // Default attach: right hand. Shields would default to Hand Hold.L
-        // — that's a future weapon-kind-aware default.
-        const bone = targetBone ?? 'Hand Hold.R'
-        if (!customModel.skeleton.bones.find((b) => b.name === bone)) {
-          console.warn(`[creator] weapon target bone '${bone}' missing on Custom`)
-          return null
-        }
-        // Synthetic source — Model 1's bone-resolution machinery in
-        // createPropGroupClonePart only reads glbMeshes for the child
-        // lookup. Append the weapon meshes so the existing code path
-        // finds them by name.
-        const syntheticSource: any = {
-          ...sourceModel,
-          glbMeshes: [...sourceModel.glbMeshes, ...entry.meshes],
-        }
-        const part = defaultPartFor(bone, 'clone' as CreatorShape)
-        part.sourceMeshName = stem
-        part.groupMeshNames = memberNames
-        const inst = createPartMesh(scene, part, customModel, syntheticSource)
-        customModel.creatorParts.set(part.id, inst)
-        bumpCreatorParts()
-        return part.id
-      },
-
-      updateCreatorPart: (id: string, patch: Partial<CreatorPart>) => {
-        const customIdx = 2
-        if (customIdx >= ed.models.length) return
-        const customModel = ed.models[customIdx]
-        const inst = customModel.creatorParts.get(id)
-        if (!inst) return
-        // Source needs weapon library meshes too so weapon clones can
-        // rebuild (e.g. when user retargets the bone, the prop-group
-        // path re-looks-up meshes by name).
-        const sourceModel = ed.models[0]
-        const weaponMeshes = (ed.weaponLibrary ?? []).flatMap((w) => w.meshes)
-        const syntheticSource: any = {
-          ...sourceModel,
-          glbMeshes: [...sourceModel.glbMeshes, ...weaponMeshes],
-        }
-        const next = updatePartMesh(scene, inst, patch, customModel, syntheticSource)
-        customModel.creatorParts.set(id, next)
-        bumpCreatorParts()
-      },
-
-      deleteCreatorPart: (id: string) => {
-        const customIdx = 2
-        if (customIdx >= ed.models.length) return
+        if (customIdx >= ed.models.length) return { ...DEFAULT_CUSTOM_SLOTS }
         const m = ed.models[customIdx]
-        const inst = m.creatorParts.get(id)
-        if (!inst) return
-        disposePartMesh(inst)
-        m.creatorParts.delete(id)
-        bumpCreatorParts()
+        return { ...(m.customSlots ?? DEFAULT_CUSTOM_SLOTS) }
       },
-
-      getCreatorParts: (): CreatorPart[] => {
-        const customIdx = 2
-        if (customIdx >= ed.models.length) return []
-        const m = ed.models[customIdx]
-        return Array.from(m.creatorParts.values()).map((i) => ({ ...i.data }))
-      },
-
-      // Bulk replace — used by persistence hydrate on page load. Disposes
-      // current parts then recreates from data. Source's glbMeshes are
-      // augmented with the weapon library so persisted weapon clones
-      // find their source mesh by name on rehydrate.
-      setCreatorParts: (parts: CreatorPart[]) => {
+      setCustomSlot: <K extends keyof CustomSlots>(slot: K, value: CustomSlots[K]): void => {
         const customIdx = 2
         if (customIdx >= ed.models.length) return
         const customModel = ed.models[customIdx]
-        const sourceModel = ed.models[0]
-        const weaponMeshes = (ed.weaponLibrary ?? []).flatMap((w) => w.meshes)
-        const syntheticSource: any = {
-          ...sourceModel,
-          glbMeshes: [...sourceModel.glbMeshes, ...weaponMeshes],
-        }
-        for (const inst of customModel.creatorParts.values()) disposePartMesh(inst)
-        customModel.creatorParts.clear()
-        for (const p of parts) {
-          if (!customModel.skeleton.bones.find((b) => b.name === p.boneName)) continue
-          const inst = createPartMesh(scene, p, customModel, syntheticSource)
-          customModel.creatorParts.set(p.id, inst)
-        }
-        bumpCreatorParts()
+        if (!customModel.customSlots) customModel.customSlots = { ...DEFAULT_CUSTOM_SLOTS }
+        ;(customModel.customSlots as any)[slot] = value
+        applySlotToCustom(customModel, slot, value as string)
+        bumpCustomSlots()
       },
-      // Subscribe to creator-parts mutations. Returns an unsubscribe fn.
-      // Used by EditorPanel to trigger the debounced persistence save.
-      addCreatorPartsListener: (fn: () => void) => {
-        creatorPartsListeners.push(fn)
+      setCustomSlots: (slots: CustomSlots): void => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return
+        const customModel = ed.models[customIdx]
+        customModel.customSlots = { ...slots }
+        for (const slot of Object.keys(slots) as (keyof CustomSlots)[]) {
+          applySlotToCustom(customModel, slot, slots[slot] as string)
+        }
+        bumpCustomSlots()
+      },
+      resetCustomSlots: (): void => {
+        const customIdx = 2
+        if (customIdx >= ed.models.length) return
+        const customModel = ed.models[customIdx]
+        customModel.customSlots = { ...DEFAULT_CUSTOM_SLOTS }
+        for (const slot of Object.keys(DEFAULT_CUSTOM_SLOTS) as (keyof CustomSlots)[]) {
+          applySlotToCustom(customModel, slot, DEFAULT_CUSTOM_SLOTS[slot] as string)
+        }
+        bumpCustomSlots()
+      },
+      // Weapon library catalogue — list of available library weapons
+      // (stem + kind), used by the Creator UI to populate the Right Hand
+      // / Left Hand dropdowns with library:<stem> options.
+      getWeaponLibrary: (): Array<{ stem: string; kind: string }> => {
+        return (ed.weaponLibrary ?? []).map((w) => ({ stem: w.stem, kind: w.kind }))
+      },
+      addCustomSlotsListener: (fn: () => void) => {
+        customSlotsListeners.push(fn)
         return () => {
-          const i = creatorPartsListeners.indexOf(fn)
-          if (i >= 0) creatorPartsListeners.splice(i, 1)
+          const i = customSlotsListeners.indexOf(fn)
+          if (i >= 0) customSlotsListeners.splice(i, 1)
         }
       },
-      getCreatorPartsRevision: () => creatorPartsRev,
+      getCustomSlotsRevision: () => customSlotsRev,
+      // The old per-bone clone APIs (addCreatorPart, addCreatorPropClone,
+      // addCreatorPropGroupClone, addCreatorWeaponClone, updateCreatorPart,
+      // deleteCreatorPart, getCreatorParts, setCreatorParts, getCreatorTargets,
+      // addCreatorPartsListener, getCreatorPartsRevision) were removed
+      // alongside the slot-based rebuild on 2026-06-02. The Custom knight
+      // now lives entirely in `customSlots`. Legacy `creatorParts` in
+      // library.json is ignored — first save after the rebuild drops it.
       getInitialAnchor: () => ({
         id: '__initial__',
         name: 'Initial position',

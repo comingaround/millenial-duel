@@ -113,10 +113,10 @@ export default function EditorPanel() {
   // needed" marker on unretargeted data.
   const [libraryRetargeted, setLibraryRetargeted] = useState(false)
   const [editorReady, setEditorReady] = useState(false)
-  // Bumped by the engine when any creator-part mutates. Used as a save
-  // effect dep so persistence fires on add/update/delete. Parts live on
-  // the engine, not in React state.
-  const [creatorPartsRev, setCreatorPartsRev] = useState(0)
+  // Bumped by the engine when any Custom slot mutates. Used as a save
+  // effect dep so persistence fires on every slot toggle. Slot state lives
+  // on the engine (Custom model's customSlots field), not in React state.
+  const [customSlotsRev, setCustomSlotsRev] = useState(0)
   // Import-baked-animation modal
   const [importOpen, setImportOpen] = useState(false)
   const [bakedList, setBakedList] = useState<Array<{ name: string; from: number; to: number }>>([])
@@ -210,7 +210,7 @@ export default function EditorPanel() {
           if (cancelled) return
           // If retarget is needed AND legacy rest pose isn't loaded yet,
           // wait for it (engine init is async — same poll pattern as the
-          // creator-parts hydrate below).
+          // customSlots hydrate below).
           const needsRetarget = data.schemaVersion !== 2
           if (needsRetarget) {
             const ready = () => {
@@ -228,14 +228,14 @@ export default function EditorPanel() {
             if (cancelled) return
           }
           applyLibrary(data)
-          // Creator parts — hydrate the Custom model. Wait for the editor
+          // Custom slots — hydrate the Custom model. Wait for the editor
           // API to be ready (createEditorScene is async); poll with a
           // short retry. Fires on the engine side, not React state.
-          if (Array.isArray(data.creatorParts) && data.creatorParts.length > 0) {
+          if (data.customSlots && typeof data.customSlots === 'object') {
             const tryApply = () => {
               const ed = (window as any).__editor
-              if (ed?.setCreatorParts) {
-                ed.setCreatorParts(data.creatorParts)
+              if (ed?.setCustomSlots) {
+                ed.setCustomSlots(data.customSlots)
                 return true
               }
               return false
@@ -255,7 +255,7 @@ export default function EditorPanel() {
     }
     hydrate()
 
-    let unsubCreator: (() => void) | null = null
+    let unsubSlots: (() => void) | null = null
     let unsubModels: (() => void) | null = null
     let unsubFocus: (() => void) | null = null
     const tryAttach = () => {
@@ -270,9 +270,9 @@ export default function EditorPanel() {
       pullModels()
       const aIdx = (ed as any).getActiveModelIndex?.() as number | undefined
       if (typeof aIdx === 'number') setActiveModelState(aIdx)
-      // Subscribe to creator-parts mutations → bump local rev → trigger save effect.
-      unsubCreator = (ed as any).addCreatorPartsListener?.(() => {
-        setCreatorPartsRev((r) => r + 1)
+      // Subscribe to Custom slot mutations → bump local rev → trigger save effect.
+      unsubSlots = (ed as any).addCustomSlotsListener?.(() => {
+        setCustomSlotsRev((r) => r + 1)
       }) ?? null
       // Re-pull names + visibilities when a model is spawned at runtime.
       unsubModels = (ed as any).addModelsChangeListener?.(pullModels) ?? null
@@ -294,7 +294,7 @@ export default function EditorPanel() {
         cancelled = true
         clearInterval(i)
         unsub?.()
-        unsubCreator?.()
+        unsubSlots?.()
         unsubModels?.()
         unsubFocus?.()
       }
@@ -302,7 +302,7 @@ export default function EditorPanel() {
     return () => {
       cancelled = true
       unsub?.()
-      unsubCreator?.()
+      unsubSlots?.()
       unsubModels?.()
       unsubFocus?.()
     }
@@ -335,15 +335,15 @@ export default function EditorPanel() {
   useEffect(() => {
     if (!hydrated) return
     const timer = setTimeout(() => {
-      // Pull live creator parts from engine — they're not in React state,
-      // they live on the Custom model directly.
-      const creatorParts = (window as any).__editor?.getCreatorParts?.() ?? []
+      // Pull live Custom slot state from engine — it's not in React state,
+      // it lives on the Custom model directly.
+      const customSlots = (window as any).__editor?.getCustomSlots?.() ?? null
       const payload: Record<string, unknown> = {
         poses,
         anchors: anchors.filter((a) => !a.system), // skip Initial position
         animations,
-        creatorParts,
       }
+      if (customSlots) payload.customSlots = customSlots
       // Only write the v2 marker AFTER a successful retarget (or if data
       // came in already marked). A skipped retarget must not poison the
       // file with a false-positive marker — without the marker, next
@@ -356,7 +356,7 @@ export default function EditorPanel() {
       }).catch(() => {})
     }, 500)
     return () => clearTimeout(timer)
-  }, [poses, anchors, animations, hydrated, creatorPartsRev, libraryRetargeted])
+  }, [poses, anchors, animations, hydrated, customSlotsRev, libraryRetargeted])
 
   // Expose resolved animations to window so engine.ts can dispatch keys
   useEffect(() => {
